@@ -1,235 +1,88 @@
-# BUG HUNT #1 — Bits that lie about themselves
+# BUG HUNT #1: Bit Manipulation
 
-> **Guidance level: maximum.** This brief walks you through the first defect from
-> start to finish, then gives you a hint for every remaining one. Later hunts
-> will give you much less. Read [`../../BUGHUNT.md`](../../BUGHUNT.md) first — it
-> is the method you will use for all six.
-
-| | |
-|---|---|
-| **Algorithm** | Bit counting, parity, bit reversal, mask testing |
-| **Defects planted** | **6** — 3 syntax, 2 logical, 1 undefined behaviour |
-| **Runs on** | Your laptop *and* the Pico. Start on the laptop. |
-| **Time** | ~45 minutes |
-| **Optional practice notes** | `LOGBOOK.md` |
+fix 6 defects in bit manipulation helpers across `bughunt1.c`.
 
 ---
 
-## The situation
+## test on host first
 
-`bughunt1.c` is a small library of bit helpers — the kind of code that sits at
-the bottom of every GPIO driver. It ships with a test harness that knows the
-right answers.
+validate logic locally on laptop before compiling for microcontroller.
 
-**Correct behaviour:** every line prints `ok`, and the program ends with
-`ALL TESTS PASS  (0 failures)`. The exact output you are aiming for is in
-[`expected.txt`](expected.txt).
-
-**Current behaviour:** it does not compile.
-
----
-
-## Step 1 — Build it and read the errors
-
-You do **not** need the Pico for this. Open a terminal in this folder:
-
-```bash
+```sh
+# compile host test harness
 gcc -Wall -Wextra -o bughunt1 bughunt1.c
-```
-
-You will get a wall of errors. This is normal and it is not six errors — it is
-one or two real problems producing a cascade. **Always fix the first error and
-rebuild.** Never try to fix the whole list at once.
-
----
-
-## Step 2 — A worked example (defect 1 of 6, free of charge)
-
-Here is the first error GCC gives:
-
-```
-bughunt1.c:28:1: error: unknown type name 'uint8_t'
-   28 | uint8_t count_bits(int value)
-      | ^~~~~~~
-bughunt1.c:16:1: note: 'uint8_t' is defined in header '<stdint.h>';
-                       did you forget to '#include <stdint.h>'?
-```
-
-**Observe.** The compiler does not know what `uint8_t` is.
-
-**Hypothesise.** `uint8_t` is not a built-in C type. It comes from a header. The
-note tells us which one.
-
-**Experiment.** Add `#include <stdint.h>` next to the other includes at the top
-of the file. Rebuild.
-
-**Result.** Roughly two-thirds of the errors vanish, because every one of them
-was the same missing header reported at a different line.
-
-> **Lesson:** the number of errors tells you almost nothing about the number of
-> defects. One missing header can produce forty errors.
-
-Now rebuild and look at what is left:
-
-```
-bughunt1.c:32:5: error: expected ',' or ';' before 'while'
-   32 |     while (value) {
-      |     ^~~~~
-```
-
-Read this one carefully, because it teaches the single most important thing
-about compiler errors:
-
-```c
-30 |     uint8_t count = 0        <-- the defect is HERE
-31 |
-32 |     while (value) {          <-- the error is reported HERE
-```
-
-The compiler was still reading the statement that began on line 30 when it hit
-`while` on line 32 and gave up. **A compiler error tells you where the compiler
-stopped coping, not where you made the mistake.** When the reported line looks
-fine, look *upward*.
-
-That is defect 1 (missing `<stdint.h>`) and defect 2 (missing semicolon). Record
-both in your logbook. Four to go.
-
----
-
-## Step 3 — Finish the build
-
-There is **one more syntax defect**. Same technique: fix the first error, rebuild,
-read again. When the file compiles, move to Step 4.
-
----
-
-## Step 4 — Now the hard part
-
-It compiles. It is still wrong. Run it:
-
-```bash
+# run tests
 ./bughunt1
 ```
 
-Some tests print `FAIL`, and one of them does something worse than fail. Work
-through them one at a time, top to bottom.
+---
 
-For each failure, before you change anything, write in your logbook:
+## defects to fix (6 total)
 
-- what the test asked for
-- what it actually returned
-- **what a single defect would have to be, to produce exactly that wrong value**
+1. line 16 (`bughunt1.c`): missing header for standard fixed-width integer types (`uint8_t`, `uint32_t`). Include `<stdint.h>`.
+2. line 32 (inside `count_bits`): missing statement terminator `;` after variable declaration.
+3. line 30 (signature of `count_bits`): signed `int` parameter causes arithmetic sign extension on negative inputs (e.g. `count_bits(-1)` shifts `1`s from the left indefinitely). Change parameter type to an unsigned 32-bit integer.
+4. line 51 (inside `even_parity`): missing closing brace `}` before `else` block.
+5. line 64 (inside `pin_is_clear`): operator precedence issue where `==` evaluates before `&`. Add parentheses around the bitwise AND expression so it is evaluated before the equality check.
+6. line 76 (inside `reverse_bits`): loop bound off-by-one. Running 33 iterations causes shifts by 32 and negative amounts (undefined behaviour). Constrain loop to run exactly 32 iterations (0 to 31).
 
-That last question is the whole skill. `got 0` when you expected `1` is a very
-different clue from `got 0x1E6A2C48` when you expected `0x1E6A2C49`.
+note: `swap_nibbles` (line 87) is already correct. Do not modify working functions.
 
 ---
 
-## Hints
+## build & flash to Pico W
 
-Open one only after you have spent ten minutes on your own. There is one hint
-per remaining defect, in the order you will meet them.
-
-<details>
-<summary><b>Hint — the program stops and never finishes</b></summary>
-
-It is not crashed. It is spinning.
-
-Which test is it stuck on? Look at the last line it printed, then look at the
-*next* test in `main()`. That is the call that never returned.
-
-Now look at the loop inside that function. The loop ends when `value` becomes
-zero. Ask yourself: for the specific argument being passed, **does `value` ever
-actually reach zero?**
-
-Pay attention to the *type* of `value`, and to what `>>` does to a negative
-number. On these GCC targets the shift copies the sign bit in from the left.
-Negative signed right shift is implementation-defined in the C versions used here.
-</details>
-
-<details>
-<summary><b>Hint — <code>pin_is_clear</code> gives the same answer for every pin</b></summary>
-
-The function returns the same result no matter which pin number you pass, which
-means the pin number is not actually reaching the comparison.
-
-C's operator precedence is not left-to-right. `==` binds **tighter** than `&`.
-Put brackets around what you *meant* and compare the two readings:
-
-```c
-(mask & (1u << pin)) == 0      /* what you meant  */
-mask & ((1u << pin) == 0)      /* what you wrote  */
-```
-
-The second one computes `mask & 0` or `mask & 1` — the shift result is thrown
-away entirely.
-
-**Take this away:** when a bit-manipulation expression mixes `&`, `<<` and `==`,
-put brackets in even when you are sure. You will be wrong about the precedence
-more often than you think.
-</details>
-
-<details>
-<summary><b>Hint — <code>reverse_bits</code> is close but not right</b></summary>
-
-Compare the value you got to the value expected, **in binary**, not hex. Add a
-temporary line to print both with `%032b`-style formatting (C has no `%b`, so
-write a tiny loop, or convert by hand for one case).
-
-Then count the iterations of the loop. How many bits are there in a `uint32_t`?
-How many times does `for (int i = 0; i <= 32; i++)` run?
-
-On the very last iteration, work out by hand what `v >> i` and `1 << (31 - i)`
-evaluate to. One of those two is asking the CPU to do something the C standard
-explicitly refuses to define.
-
-> This is the defect class that will hunt you for the rest of the module.
-> A shift by an amount greater than or equal to the width of the type is
-> **undefined behaviour**. It might give 0. It might give `v`. It might give
-> whatever was in the register. It may behave differently on your laptop and on
-> the Pico — and it is allowed to.
-</details>
-
-<details>
-<summary><b>Hint — is <code>swap_nibbles</code> broken at all?</b></summary>
-
-No. It is correct.
-
-Not every function in a broken file is broken, and one of the most expensive
-debugging mistakes is "fixing" working code because you are already in the mood
-to change things. If your logbook has a row where you modified `swap_nibbles`,
-that row is a lesson too — write down what made you suspect it.
-</details>
-
----
-
-## Step 5 — Run it on the actual hardware
-
-Once all tests pass on your laptop, build it for the Pico:
-
-```bash
-mkdir build && cd build
+macOS:
+```sh
+# copy sdk import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# configure and build
+mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
-make
+make -j8 bughunt1
+# flash to pico (bootsel mode)
+cp bughunt1.uf2 /Volumes/RPI-RP2
+# open serial monitor (Ctrl-A Ctrl-\ to exit)
+screen /dev/tty.usbmodem* 115200
 ```
 
-Copy `bughunt1.uf2` onto the Pico and open the serial monitor. You should see
-the identical output.
-
-**Why bother, if it already passes on the laptop?** Because "it works on my
-machine" is the oldest lie in software. The laptop is a 64-bit x86 with a
-different compiler, different type sizes and different default signedness. From
-Bug Hunt #2 onward, that difference will bite you deliberately.
+windows (powershell):
+```powershell
+# copy sdk import helper
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+# configure and build
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target bughunt1
+# flash to pico
+Copy-Item bughunt1.uf2 -Destination D:\
+```
 
 ---
 
-## Reflect on your attempt
+## expected output
 
-`LOGBOOK.md` in this folder, with **at least six rows** — one per defect — plus
-any wrong hypotheses you tried along the way. The wrong ones count. They are the
-evidence that you were reasoning rather than guessing.
+```
+BUG HUNT #1 - bit manipulation
 
-## After your attempt
+count_bits
+  count_bits(0x000000FF)             got 8          expect 8          ok
+  count_bits(0x00000024)             got 2          expect 2          ok
+  count_bits(-1)                     got 32         expect 32         ok
+even_parity
+  even_parity(0x000000FF)            got 1          expect 1          ok
+  even_parity(0x00000007)            got 0          expect 0          ok
+pin_is_clear (mask 0x24)
+  pin_is_clear(LED_MASK, 2)          got 0          expect 0          ok
+  pin_is_clear(LED_MASK, 3)          got 1          expect 1          ok
+  pin_is_clear(LED_MASK, 5)          got 0          expect 0          ok
+reverse_bits
+  reverse_bits(0x00000001)           got 0x80000000  expect 0x80000000  ok
+  reverse_bits(0x12345678)           got 0x1E6A2C48  expect 0x1E6A2C48  ok
+  reverse_bits(0xFFFFFFFF)           got 0xFFFFFFFF  expect 0xFFFFFFFF  ok
+swap_nibbles
+  swap_nibbles(0x12345678)           got 0x21436587  expect 0x21436587  ok
 
-This is ungraded practice; the logbook and reflection prompts are optional.
-Compare your reasoning with the separate [answer guide and corrected source](../../answers/bughunt1/README.md).
+ALL TESTS PASS  (0 failures)
+```

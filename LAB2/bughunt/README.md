@@ -1,263 +1,101 @@
-# BUG HUNT #2 — The frame that arrives wrong
+# BUG HUNT #2: Framing & Serialisation (pair)
 
-> **Guidance level: high, but stepping down.** You still get a worked technique
-> and hints, but the hints are now grouped by *area* rather than one per defect —
-> there are fewer hints than there are defects. Method: [`../../BUGHUNT.md`](../../BUGHUNT.md).
+fix 7 defects in UART packet encoding, checksum verification & stream synchronisation across frame codec & Pico link driver (requires 2 boards / pair).
 
-| | |
-|---|---|
-| **Algorithm** | Serialisation, framing, checksums |
-| **Defects planted** | **7** — 5 in `frame.c`, 2 in `bughunt2_pico.c` |
-| **Runs on** | Five codec defects can be checked on the laptop; validate the two link defects on two Picos. |
-| **Time** | ~60 minutes |
+extra hardware:
+- Pico
+- 3x jumper wires
 
 ---
 
-## The situation
+## test on host first
 
-A sensor reading has to travel from one Pico to another over UART. To do that it
-must be flattened into a stream of bytes, framed so the receiver knows where it
-starts and ends, checksummed so corruption is detected, and rebuilt on the far
-side.
+validate codec logic locally on laptop with unit tests & sanitizers before flashing hardware.
 
-**The specification is at the top of [`frame.h`](frame.h). The specification is
-correct. The code is not.**
-
-That distinction matters more than it sounds. In real firmware the wire format is
-agreed with another team, another company, or a chip you cannot modify. You do
-not get to redefine the protocol because your encoder is easier to write that
-way. **Fix the code to match the spec, never the spec to match the code.**
-
----
-
-## Step 1 — Look at the bytes
-
-```bash
+```sh
+# compile & run host test harness
 gcc -Wall -Wextra -o bughunt2_host bughunt2_host.c frame.c
 ./bughunt2_host
-```
 
-The harness encodes three known readings, prints what the specification says the
-bytes should be, prints what your encoder actually produced, and diffs them.
-
-The very first line of output is a gift:
-
-```
-sizeof(reading_t) = 12 bytes
-```
-
-The specification says the payload is **9 bytes**. Sit with that for a moment
-before reading on. Nothing in `reading_t` is bigger than it looks — 2 + 1 + 2 + 4
-is nine. So where did the other three bytes come from, and *where inside the
-struct are they*?
-
-> **The technique this week is: hex-dump at every boundary.** Not the decoded
-> value — the raw bytes, on both sides of the wire, and diff them by eye. A
-> decoded value tells you *that* something is wrong. The bytes tell you *what*.
-
----
-
-## Step 2 — Read the diff like a forensic scientist
-
-Here is real output from the broken encoder for vector A:
-
-```
-expected   [12] AA 09 12 34 01 00 FD 0A 0B 0C 0D 72
-encoded    [14] AA 0C 34 12 01 00 FD 00 00 00 0D 0C 0B 68
-```
-
-Do not fix anything yet. Extract every independent fact you can:
-
-- The length byte says `0C`, not `09`.
-- `12 34` came out as `34 12`. So did `0D 0C 0B` versus `0A 0B 0C 0D`.
-- There are `00 00 00` bytes in the middle that the specification never asked for.
-- The frame is 14 bytes, but the length byte claims 12 payload bytes — 2 header
-  + 12 payload + 1 checksum would be 15. **The frame is internally inconsistent
-  with its own length field.**
-
-That is four distinct clues, and they are **not** four separate defects — some of
-them share a cause. Working out which symptoms collapse into one root cause is
-the actual exercise. Write all four observations in your logbook as separate
-rows, then start merging them as you form hypotheses.
-
----
-
-## Step 3 — A new instrument: the undefined-behaviour sanitiser
-
-Your laptop compiler can be asked to check, at runtime, for operations that C
-leaves undefined:
-
-```bash
-gcc -Wall -Wextra -fsanitize=undefined -o bughunt2_ub bughunt2_host.c frame.c
-./bughunt2_ub
-```
-
-Try it. It will name a file, a line, and the exact operation:
-
-```
-frame.c:48:36: runtime error: left shift of 128 by 24 places
-               cannot be represented in type 'int'
-```
-
-**This is a defect you would almost certainly not have found by reading**, and it
-is one of the nastiest kinds: the code produces the right answer today, on this
-compiler, at this optimisation level. Work out *why* shifting a `uint8_t` left by
-24 involves a type called `int` at all — the answer is "integer promotion", and
-it is responsible for an enormous share of real firmware bugs.
-
-You cannot run the sanitiser on the Pico. This is one more reason to do as much
-work as possible on the laptop first.
-
----
-
-## Step 4 — Onto the hardware
-
-After fixing the valid-frame failures, rerun with both sanitizers:
-
-```bash
+# compile with AddressSanitizer & UndefinedBehaviorSanitizer
 gcc -Wall -Wextra -fsanitize=address,undefined -g -o bughunt2_check bughunt2_host.c frame.c
 ./bughunt2_check
 ```
 
-The harness now proceeds to malformed inputs. If the decoder is still unsafe,
-this stage can stop in a sanitizer report; that is another defect to investigate.
-When it prints `CODEC MATCHES THE SPECIFICATION` with no sanitizer reports, flash
-`bughunt2_pico.c` to **both** boards, wire them up as described in the file
-header, and press GP20 on one of them.
+---
 
-Two defects remain, and they only exist on a real link. Expect the receiver to
-print something like:
+## defects to fix (7 total)
 
-```
-tx         [12] AA 09 12 34 01 00 FD 0A 0B 0C 0D 72
-rx         [12] AA 09 12 34 01 00 FD 0D 0A 0B 0C 0D
-           BAD FRAME (checksum or header rejected)
-```
-
-and then for **every subsequent frame to be wrong too, forever**, even though you
-have not changed anything.
-
-Those are two separate defects: one puts a byte on the wire that should not be
-there, and one means the receiver can never recover once it is out of step. Both
-are extremely common in real products.
+1. line 7 (`frame.c`, inside `frame_encode`): struct padding & memory alignment. The expression `sizeof(reading_t)` evaluates to 12 bytes due to 32-bit alignment padding inserted by the compiler between `temp_c_x10` and `timestamp_ms`. The wire specification requires exactly 9 packed payload bytes. Set payload length to the constant `FRAME_PAYLOAD` (9) & serialize fields explicitly rather than relying on `sizeof`.
+2. lines 11-19 (`frame.c`, inside `frame_encode`): host byte order (endianness). Direct memory copying (`(const uint8_t *)r`) preserves host little-endian format (e.g. `0x1234` becomes `34 12`). The protocol specification mandates network big-endian format (MSB first) for multi-byte fields (`sensor_id`, `temp_c_x10`, `timestamp_ms`). Extract each byte using explicit bitwise shifts (`>> 24`, `>> 16`, `>> 8`).
+3. line 16 & line 18 (`frame.c`, inside `frame_encode`): short copy loop & incomplete checksum. The loop condition `i < len - 1` copies only 8 bytes instead of all 9 payload bytes, causing a mismatch between the declared length and emitted bytes, while omitting the 9th byte from the checksum sum. Iterate across all `len` payload bytes (`i < len`).
+4. line 48 (`frame.c`, inside `frame_decode`): signed integer promotion in left shift. The expression `(payload[5] << 24)` shifts an 8-bit unsigned integer promoted to signed 32-bit `int`. When the MSB is 1 (values $\ge$ 128), shifting into bit 31 invokes undefined behavior in C. Explicitly cast `payload[5]` to `(uint32_t)` before shifting left by 24.
+5. lines 34-37 (`frame.c`, inside `frame_decode`): unchecked payload length & stack buffer bounds. The variable `len = in[1]` is read directly from external input without validation. An untrusted length exceeding `FRAME_MAX` overruns the stack buffer `payload[]`, while a truncated `in_len` reads beyond the input buffer. Verify that `len == FRAME_PAYLOAD` & `in_len == len + 3` before copying or decoding.
+6. line 40 & line 51 (`bughunt2_pico.c`, inside `link_init` & `send_reading`): text newline translation on binary UART link. Enabling `uart_set_translate_crlf(LINK_UART, true)` & transmitting with `uart_putc()` translates any binary byte matching `0x0A` (ASCII LF, e.g. in timestamps or sensor IDs) into `0x0D 0x0A`, corrupting binary packets. Disable CRLF translation (`false`) & use `uart_putc_raw()` to transmit raw bytes.
+7. lines 59-78 (`bughunt2_pico.c`, inside `rx_poll`): rigid receive window & missing frame resynchronisation. The receiver counts 12 raw bytes unconditionally without hunting for the start-of-frame byte (`FRAME_SOF = 0xAA`). A single dropped or spurious noise byte shifts frame alignment permanently. Implement a frame hunter state machine that searches for `0xAA`, verifies payload length, validates checksum, and resynchronises upon error.
 
 ---
 
-## Hints
+## build & flash to Pico W
 
-One hint per *area*, not per defect. Some areas contain more than one defect.
-
-<details>
-<summary><b>Hint — the encoder (3 defects here)</b></summary>
-
-The encoder takes a `reading_t *`, casts it to `uint8_t *`, and copies raw bytes
-off the front of the struct. Ask two questions about that approach:
-
-1. **Is the struct laid out the way you assume?** The compiler is allowed to
-   insert unnamed padding between members so each one lands on an address it can
-   access efficiently. Print `offsetof(reading_t, temp_c_x10)` and
-   `offsetof(reading_t, timestamp_ms)` (from `<stddef.h>`) and compare them to
-   the offsets the specification demands.
-
-2. **Is the byte order the way you assume?** The RP2040 and your laptop are both
-   little-endian; the specification is big-endian. A raw memory copy preserves
-   the machine's order, not the protocol's.
-
-The fix for both is the same, and it is the fix used in essentially all real
-protocol code: **do not copy structs onto a wire.** Write each field out
-explicitly, one byte at a time, most-significant byte first. It is more typing
-and it is correct on every compiler and every architecture.
-
-There is one further defect in the encoder that has nothing to do with layout.
-Compare the number of payload bytes the loop writes against the number the length
-byte promises. Then check whether the checksum covers exactly the bytes the
-specification says it covers.
-
-**Make the fix permanent.** Keep the golden-byte tests. An assertion about the
-in-memory struct size does not prove that the wire bytes match the protocol;
-explicit serialization should work regardless of that size.
-</details>
-
-<details>
-<summary><b>Hint — the decoder (2 defects here)</b></summary>
-
-One is the sanitiser finding from Step 3. Fixing it is a matter of making the
-promotion explicit rather than accidental — cast to the type you actually want
-*before* you shift, not after you have already lost the value.
-
-The other is a security defect. Once the valid-frame tests pass, the harness
-also sends malformed frames. Look at where the length byte comes from and
-where it is used:
-
-```c
-len = in[1];                              /* attacker-controlled */
-for (uint8_t i = 0; i < len; i++)
-    payload[i] = in[2 + i];               /* how big is payload[]? */
+macOS:
+```sh
+# copy SDK import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# configure & build
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 bughunt2
+# flash to Pico W (bootsel mode)
+cp bughunt2.uf2 /Volumes/RPI-RP2
+# open serial monitor (Ctrl-A Ctrl-\ to exit)
+screen /dev/tty.usbmodem* 115200
 ```
 
-`len` arrives over a wire. It could be anything — corruption, noise, or a
-deliberately hostile device. `payload` is a fixed-size local array, which means
-it lives on the stack, next to your return address.
-
-**Never trust a length that came from outside your program.** Validate it against
-both your buffer size and the number of bytes you actually received, before you
-use it as a loop bound. Also check that the length is the one required by this
-protocol. Run hostile-input experiments under AddressSanitizer.
-</details>
-
-<details>
-<summary><b>Hint — the link (2 defects here) — open only after you have two boards running</b></summary>
-
-**On the extra byte.** Compare the `tx` and `rx` hex dumps byte by byte. If the
-receiver saw a byte the transmitter never printed, the byte was added *after*
-`hexdump()` ran — so it was added by the transmit path itself, not by the
-encoder. Look at every line of `link_init()` and ask what each one does to a
-byte before it reaches the wire. One of them is documented as a convenience for
-text. This payload is not text. Which byte value would that convenience react
-to, and is that value present in the frame? (Check the hex dump.)
-
-> This is a genuinely nasty class of bug: a helper that is correct for the use
-> case it was designed for (printing strings) and silently corrupting for the
-> use case you put it to (moving binary data). The SDK offers a `_raw` variant
-> of that function for exactly this reason.
-
-**On never recovering.** The receiver counts bytes and declares a frame complete
-when it has 12 of them. It never checks that byte 0 is actually `0xAA`. So a
-single spurious or dropped byte shifts the window by one — permanently. Every
-frame from then on is a mixture of two real frames.
-
-A real receiver is a small state machine: *hunt for `0xAA`* → *read the length* →
-*read that many payload bytes* → *check the checksum* → back to hunting. If any
-step fails, it goes back to hunting rather than blindly continuing. Bug Hunt #3
-uses the same state-machine reasoning for encoder edges, not UART frames.
-</details>
+windows (powershell):
+```powershell
+# copy SDK import helper
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+# configure & build
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target bughunt2
+# flash to Pico W
+Copy-Item bughunt2.uf2 -Destination D:\
+```
 
 ---
 
-## Something worth knowing before Bug Hunt #3
+## expected output
 
-Plain `char` is **unsigned** on the Pico's compiler (`arm-none-eabi-gcc`) and
-**signed** on your laptop's x86 GCC. If you ever store a received byte in a
-`char` and compare it to `0xAA`, that comparison is true on the Pico and false on
-your laptop, from identical source.
+host test harness:
+```
+BUG HUNT #2 - frame codec
+sizeof(reading_t) = 12 bytes
 
-Nothing in this hunt depends on it. But when the host harness and the hardware
-disagree and you cannot see why, this is the first thing to check — and it is why
-"it passed on my laptop" is never the end of the argument.
+--- vector A: normal ---
+expected   [12] AA 09 12 34 01 00 FD 0A 0B 0C 0D 72 
+encoded    [12] AA 09 12 34 01 00 FD 0A 0B 0C 0D 72 
 
-Use `uint8_t` for bytes. Always.
+--- vector B: high timestamp, negative temp ---
+expected   [12] AA 09 00 07 00 FF C9 80 11 22 33 B5 
+encoded    [12] AA 09 00 07 00 FF C9 80 11 22 33 B5 
 
----
+--- vector C: extremes ---
+expected   [12] AA 09 FF FF FF 80 00 00 00 00 00 7D 
+encoded    [12] AA 09 FF FF FF 80 00 00 00 00 00 7D 
 
-## Reflect on your attempt
+--- malformed frames (must all be rejected) ---
+CODEC MATCHES THE SPECIFICATION  (0 failures)
+```
 
-Optionally use `LOGBOOK.md` for the **seven** intended defects and your hypothesis trail. In the
-reflection section, answer this one specifically:
+Pico serial monitor output (press GP20 to transmit):
+```
+BUG HUNT #2 - press GP20 to send a reading
+sizeof(reading_t) = 12 bytes
 
-> Two of the four symptoms you listed in Step 2 had the same root cause. Which
-> two, and what made you realise they were not independent?
-
-## After your attempt
-
-This is ungraded practice; the logbook and reflection prompts are optional.
-Compare your reasoning with the separate [answer guide and corrected source](../../answers/bughunt2/README.md).
+tx         [12] AA 09 12 34 01 00 FD 0A 0B 0C 0D 72 
+rx         [12] AA 09 12 34 01 00 FD 0A 0B 0C 0D 72 
+           id=0x1234 status=1 temp=25.3 C t=168496141 ms
+```

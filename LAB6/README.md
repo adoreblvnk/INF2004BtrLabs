@@ -1,157 +1,43 @@
-# LAB 6: OPTIMISATION & DEBUGGING
+# LAB 6: Optimization & Debugging
 
-**OBJECTIVES**
--	Implement a few optimisation methods
--	Configure and use a debugger for the Raspberry Pi Pico
+execution time measurement, clock scaling, hardware debugging with PicoProbe & OpenOCD on Raspberry Pi Pico W.
 
+---
 
-**EQUIPMENT** 
-1.	A laptop that has the Pico C/C++ SDK installed
-2.	Raspberry Pico W
-3.	Micro-USB Cable
+## hardware & wiring overview
 
-> [NOTE]
-> Only students wearing fully covered shoes are allowed in the lab due to safety.
+PicoProbe debugger & target Raspberry Pi Pico W wiring.
 
-## **INTRODUCTION** 
+![PicoProbe Hardware Connection](picoprobe.jpg)
+- PicoProbe (left): Raspberry Pi Pico running `picoprobe.uf2` firmware acting as CMSIS-DAP debugger & UART bridge.
+- target Pico W (right): RP2040 microcontroller executing debug firmware.
+- SWD interface connection: GP2 (SWCLK) -> SWCLK (target pin), GP3 (SWDIO) -> SWDIO (target pin), GND -> GND.
+- UART pass-through connection: GP4 (UART1 TX) -> GP1 (UART0 RX on target), GP5 (UART1 RX) -> GP0 (UART0 TX on target).
 
-This lab focuses on two essential aspects of embedded systems programming with the Raspberry Pi Pico: optimization and debugging. Optimization ensures efficient code execution, while debugging tools and techniques help identify and fix errors in your code. These skills are vital for developing reliable and high-performance embedded applications. Optimization is particularly crucial for embedded systems like the Raspberry Pi Pico due to their limited resources, real-time requirements, and cost considerations. It helps improve performance, efficiency, and cost-effectiveness. Debugging is essential for ensuring that applications on embedded systems work correctly. It helps you find and resolve errors in your code, which is especially important for embedded systems where errors can lead to system crashes or failures. Some examples of optimization include choosing the right data types, using efficient algorithms, optimizing memory usage, and reducing power consumption.
+---
 
-## **OPTIMISATION TECHNIQUES**
+## environment setup
 
-In the context of embedded systems, optimization techniques are fundamental practices that enhance the efficiency and performance of software running on resource-constrained devices like microcontrollers. Code optimization involves refining algorithms, reducing unnecessary operations, and optimizing code structure to ensure faster execution and minimal resource consumption. Memory optimization is crucial for conserving limited memory resources by employing efficient data structures and variable management. Compiler optimization, specifically tailored for embedded systems, fine-tunes code translation to machine code, resulting in improved execution speed and reduced memory usage. These techniques are essential for developing embedded applications that operate efficiently, meet real-time constraints, and maximise the limited hardware resources available in embedded systems. Verifying and observing optimization techniques in embedded systems programming, particularly on platforms like the Raspberry Pi Pico, combines techniques and tools. Here's how you can verify and observe the optimization techniques discussed. 
+install OpenOCD, GDB & configure VSCode debug extension.
 
-We discussed the various techniques that can be deployed to improve execution performance. In this lab session, we will employ timing functions to measure and record the program's execution time before and after optimization. This data will allow you to quantitatively assess the effectiveness of the applied optimizations and gain insights into the performance improvements achieved.
-
-**Execution Time Measurement**
-
-The following is a simple code example in C for measuring and comparing execution times before and after optimization using the `pico_time.h` library on the Raspberry Pi Pico. In this example, we have a simple `timeConsumingTask()` function simulating a computationally intensive task that we would like to measure the execution time before and after optimization and then compare the results to determine the effectiveness of the optimizations. You can apply your specific optimizations within the code and observe their impact on execution time.
-
-```c
-#include <stdio.h>
-#include <inttypes.h>
-#include "pico/stdlib.h"
-#include "pico/time.h"
-
-// Volatile, so the compiler is not allowed to assume the result is unused.
-// See the note below on dead-code elimination - without this, there is
-// nothing here to measure.
-static volatile uint32_t sink;
-
-// Function to perform a time-consuming task
-void timeConsumingTask() {
-    for (int i = 0; i < 1000000; i++) {
-        sink = i * 2;
-    }
-}
-
-int main() {
-    // Initialize the Raspberry Pi Pico SDK
-    stdio_init_all();
-
-    // Measure execution time before optimization
-    absolute_time_t start_time = get_absolute_time();
-    timeConsumingTask();
-    absolute_time_t end_time = get_absolute_time();
-
-    // absolute_time_diff_us() returns int64_t. Store it in one, and print
-    // it with PRId64 - see the note below on why this matters here of all
-    // places.
-    int64_t execution_time_before = absolute_time_diff_us(start_time, end_time);
-
-    printf("Execution Time Before Optimization: %" PRId64 " microseconds\n",
-           execution_time_before);
-
-    // Apply your optimizations, then measure again
-    start_time = get_absolute_time();
-    timeConsumingTask();
-    end_time = get_absolute_time();
-
-    int64_t execution_time_after = absolute_time_diff_us(start_time, end_time);
-
-    printf("Execution Time After Optimization: %" PRId64 " microseconds\n",
-           execution_time_after);
-
-    // Compare execution times
-    if (execution_time_after < execution_time_before) {
-        printf("Optimizations were effective in reducing execution time.\n");
-    } else {
-        printf("Optimizations did not significantly improve execution time.\n");
-    }
-
-    return 0;
-}
+macOS:
+```sh
+# install openocd with rp2040 support & arm toolchain via brew
+brew install openocd-rp2040 arm-none-eabi-gdb
+# download picoprobe firmware binary for debugger pico
+mkdir -p ~/pico/picoprobe && cd ~/pico/picoprobe
+curl -LO https://github.com/raspberrypi/picoprobe/releases/latest/download/picoprobe.uf2
 ```
 
-> [!IMPORTANT]
-> **Two things in the code above are there deliberately, and both were wrong in the version this lab used to ship.** They are worth more than the example itself.
->
-> **1. The measurement was truncated and then printed with the wrong conversion.** `absolute_time_diff_us()` returns an **`int64_t`**. The old version assigned it to a `uint32_t` — which silently discards the top 32 bits — and then printed it with `%d`, which is for `int`. Passing a value of one type where a variadic function expects another is undefined behaviour, not a formatting preference. This is the same defect planted in Bug Hunt #4 and present in [`pid.c`](pid.c). **In the lab about debugging, in the code you are asked to measure with.** Use `int64_t` and `PRId64` from `<inttypes.h>`, which is correct on every platform.
->
-> **2. The task's result was never used, so the compiler deleted the whole loop.** The old version computed `int result = i * 2;` and then did nothing with `result`. Nothing observable depends on it, so under the "as-if" rule the compiler is entitled to remove the assignment; with the body empty, the loop itself becomes removable; and the call to an empty function is removable too. The mechanism has a name — **dead-code elimination** — and at `-O2` it will reduce the entire benchmark to nothing, so both measurements come back as a couple of microseconds of function-call overhead and the comparison is meaningless.
->
-> The `volatile` on `sink` is what stops it. `volatile` tells the compiler that a write may have effects it cannot see, so the write must actually happen and the loop must actually run.
->
-> **Remember this for Bug Hunt #6.** One of its twelve defects is a calibration delay written as an empty `for` loop, deleted by exactly this mechanism, on a part whose datasheet requires that delay. The compiler did not break the code — it read the code, proved the loop had no effect, and acted on the proof.
-
-**Reducing Clock Speed for Lower Power**
-
-Power optimization through clock speed reduction is common in embedded systems, including those based on the Raspberry Pi Pico or similar microcontrollers. The idea is to lower the clock frequency of the microcontroller to reduce power consumption while still meeting the application's performance requirements. 
-
-The sample code [hello_48MHz](https://github.com/raspberrypi/pico-examples/blob/master/clocks/hello_48MHz/hello_48MHz.c) demonstrates how the main clock speed of the Raspberry Pi Pico can be reduced from 125Mhz to 48Mhz. However, reducing the clock speed will slow down the microcontroller and thus take longer for code to run. All other clocks that are derived from the main clock will be immediately affected by this, e.g. PWM, Timer, etc.
-
-> [NOTE]
-> Remember to include `pico_enable_stdio_usb(hello_48MHz 1)`
-
-
-## Debugging Tools and Techniques
-
-**LED Debugging**
-
-Incorporate an LED into your Raspberry Pi Pico project to offer visual cues throughout program execution. By employing various LED blinking patterns, you can effectively communicate specific program states or highlight potential errors, enhancing the user interface and debugging process. Harness the LED's behavior as a debugging aid, allowing you to observe its responses to code execution and swiftly identify any issues that may arise. This integrated approach of using an LED not only enhances user interaction but also streamlines the debugging and troubleshooting aspects of your embedded system development.
-
-To incorporate the necessary libraries.
-```
-#include "pico/cyw43_arch.h"
-#include "hardware/gpio.h"
+windows (powershell):
+```powershell
+# clone & build openocd or install via pico setup installer
+New-Item -ItemType Directory -Force -Path C:\pico\picoprobe
+Invoke-WebRequest -Uri "https://github.com/raspberrypi/picoprobe/releases/latest/download/picoprobe.uf2" -OutFile "C:\pico\picoprobe\picoprobe.uf2"
 ```
 
-To initialise the LED that is connected to the WiFi SoC
-```
-    if (cyw43_arch_init()) {
-        printf("Wi-Fi init failed");
-        return -1;
-    }
-```
-
-You can define the following function to control the blinking LED to observe the application's progress.
-```
-void blink_led(uint gpio_pin, uint32_t period_ms, int num_blinks) {
-    for (int i = 0; i < num_blinks; i++) {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);  // Turn the LED on
-        sleep_ms(period_ms);
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);  // Turn the LED off
-        sleep_ms(period_ms);
-    }
-}
-```
-
-**Serial Debugging with UART**
-
-This method has been used since lab 1. It establishes UART communication between your Raspberry Pi Pico and computer, enabling the exchange of debugging information such as variable values, status updates, and execution progress. This communication is achieved through methods like `printf`. Utilize a serial terminal or debugging tool on your computer to receive and assess the UART output, facilitating effective debugging of your Pico-based projects. Remember to include the following in the project's CMakeLists.txt file (BEFORE `pico_add_extra_outputs(picow_xxx)`):
-
-``` c
-pico_enable_stdio_usb(picow_xxxx 1)
-```
-
-**Debugging with PicoProbe or Debug Probe**
-
-The following image demonstrates how to connect the debugger, PicoProbe (left) connected to the target Pico (right).
-You may flash the binary image (picoprobe.uf2) found [here](https://github.com/raspberrypi/picoprobe/releases) onto the picoprobe (the pico you choose to become your debugger).
-![Screenshot of Pull-up Pressed](picoprobe.jpg)
-
-The following is the launch.json file (for those using Windows).
-```
+VSCode `.vscode/launch.json` configuration:
+```json
 {
   "version": "0.2.0",
   "configurations": [
@@ -174,130 +60,261 @@ The following is the launch.json file (for those using Windows).
         "adapter speed 5000"
       ]
     }
-]
+  ]
 }
 ```
 
-In the CMake tool, perform the following actions on the project you want to build:
+---
 
-- Right-click the project and select "Set as Build Target". This ensures that the project is compiled when you build.
-- Right-click the project again and select "Set as Launch/Debug Target". This designates the project as the one to be launched or debugged when you start a debugging session.
+## task 1: execution time measurement & optimization
 
-![Screenshot of Pull-up Pressed](settarget.PNG)
+measure execution duration accurately using `pico/time.h` APIs & prevent compiler dead-code elimination.
 
-If done correctly, you should see the 'rocket' and 'hammer' icon beside your project name as shown below.
+key timing principles:
+- `absolute_time_diff_us()` returns a signed 64-bit integer (`int64_t`). Storing the result in `uint32_t` truncates the upper 32 bits, while printing with `%d` invokes undefined behaviour. Use `int64_t` & the `PRId64` format specifier from `<inttypes.h>`.
+- dead-code elimination: under optimization flags (`-O2`, `-O3`), loops computing values that do not affect observable program state are deleted entirely by the compiler. Declare a `static volatile uint32_t sink;` variable to force memory writes on each iteration.
 
-![Screenshot of Pull-up Pressed](selectdebug.png)
-
-In the Run & Debug tool, click the Pico Debug button (the one with the green triangle). VSCode will compile and download the executable directly into your target pico via the debugger-pico. You do not need to download the executable (aka .uf2) into the target pico.
-
-![Screenshot of Pull-up Pressed](debugging.png)
-
-
-## **EXERCISE 1 — Optimisation, with numbers**
-
-Four functions that are slower than they need to be, a correctness harness that
-will not let you trade the right answer for a fast one, and a measurement
-harness that runs on the actual RP2040. You write the fast versions; you report
-microseconds before and after at three optimisation levels, the mechanism in
-each case, and one disassembly extract that proves it.
-
-Two of the four exist because the Cortex-M0+ has **no floating-point unit and
-no divide instruction** — facts that are not true of the laptop you have been
-testing on all semester. And you build at three optimisation levels, because
-part of the answer is finding out how much of your cleverness the compiler was
-already doing without being asked.
-
-> **Start here:** [`optimise/`](optimise/)
-
-## **EXERCISE 2 — Debugging**
-
-Here's a pseudo-code representation of the given C code for a PID controller. Find and correct all the logical and syntax errors in [`pid.c`](pid.c). There are **at least** 5 logical and 5 syntax errors.
-This pseudo-code provides a high-level description of the PID control algorithm and the simulation loop. It outlines the key steps and calculations the code performs without getting into specific programming language syntax.
-
+benchmark code:
 ```c
-// Initialize PID controller parameters
-Kp = 1.0
-Ki = 0.1
-Kd = 0.01
+#include <stdio.h>
+#include <inttypes.h>
+#include "pico/stdlib.h"
+#include "pico/time.h"
 
-// Initialize variables
-setpoint = 100.0
-current_value = 0.0
-integral = 0.0
-prev_error = 0.0
+// volatile sink prevents compiler from eliminating the benchmark loop
+static volatile uint32_t sink;
 
-// Initialize simulation parameters
-time_step = 0.1
-num_iterations = 100
+void timeConsumingTask(void) {
+    for (int i = 0; i < 1000000; i++) {
+        sink = (uint32_t)(i * 2);
+    }
+}
 
-// Main control loop
-for i = 0 to num_iterations - 1:
-    // Compute error
-    error = setpoint - current_value
+int main(void) {
+    stdio_init_all();
+    sleep_ms(3000);
 
-    // Update integral term
-    integral += error
+    printf("measuring execution time...\n");
 
-    // Compute derivative term
-    derivative = error - prev_error
+    // measure execution time before optimization
+    absolute_time_t start_time = get_absolute_time();
+    timeConsumingTask();
+    absolute_time_t end_time = get_absolute_time();
 
-    // Compute control signal
-    control_signal = Kp * error + Ki * integral + Kd * derivative
+    int64_t execution_time_before = absolute_time_diff_us(start_time, end_time);
+    printf("Execution Time Before: %" PRId64 " microseconds\n", execution_time_before);
 
-    // Update previous error
-    prev_error = error
+    // measure execution time after optimization
+    start_time = get_absolute_time();
+    timeConsumingTask();
+    end_time = get_absolute_time();
 
-    // Simulate motor dynamics (for demonstration purposes)
-    motor_response = control_signal * 0.1
+    int64_t execution_time_after = absolute_time_diff_us(start_time, end_time);
+    printf("Execution Time After:  %" PRId64 " microseconds\n", execution_time_after);
 
-    // Update current position
-    current_value += motor_response
-
-    // Display results
-    Print "Iteration ", i, ": Control Signal = ", control_signal, ", Current Position = ", current_value
-
-    // Sleep for the time step (for demonstration purposes)
-    Sleep for time_step seconds
-
-// End of main control loop
+    return 0;
+}
 ```
 
-## Additional Resources
-[Raspberry Pi Pico SDK Documentation](https://www.raspberrypi.com/documentation/pico-sdk/index_doxygen.html)
+build & flash to Pico W:
+
+macOS:
+```sh
+# copy SDK import helper from ~/pico
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# copy CMakeLists from bughunt & patch target to task1
+cp bughunt/CMakeLists.txt CMakeLists.txt
+sed -i '' '/bughunt6\.c/d; s/bughunt6_pico\.c/task1.c/g; s/bughunt6/task1/g' CMakeLists.txt
+# configure build directory & compile
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 task1
+# flash UF2 via bootsel volume
+cp task1.uf2 /Volumes/RPI-RP2
+# monitor serial output
+screen /dev/tty.usbmodem* 115200
+```
+
+windows (powershell):
+```powershell
+# copy SDK import helper & CMakeLists from bughunt
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
+(Get-Content CMakeLists.txt) -notmatch 'bughunt6\.c' | Set-Content CMakeLists.txt
+(Get-Content CMakeLists.txt) -replace 'bughunt6_pico\.c', 'task1.c' -replace 'bughunt6', 'task1' | Set-Content CMakeLists.txt
+# build
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target task1
+# flash
+Copy-Item task1.uf2 -Destination D:\
+```
 
 ---
 
-## **BUG HUNT #6 — Only the disassembly tells the truth**
+## task 2: power reduction via clock frequency
 
-The last [Bug Hunt](../BUGHUNT.md), and the reason for the previous five. The
-algorithms are a **CRC-8 table generator, an LFSR, and a frame parser**.
+scale RP2040 system clock down from default 125 MHz to 48 MHz to reduce dynamic power consumption.
 
-**Twelve defects** are planted, and every instrument you have relied on so far is
-either useless here or actively misleading. One variable is corrupted by code
-that never mentions it. One line of C is a perfectly legal instruction on your
-laptop and an illegal one on a Cortex-M0+. Two defects are invisible at `-O0` and
-fatal at `-O3`. `printf` changes the answer, because one of the defects reads
-whatever the stack happened to contain.
+key clock management concepts:
+- dynamic power consumption in CMOS digital logic is proportional to frequency ($P \propto C \cdot V^2 \cdot f$). Lowering system clock frequency reduces power consumption linearly at the expense of computational throughput.
+- reducing system clock impacts all peripherals clocked from `clk_sys` & `clk_peri` (UART baud rate generators, PWM dividers, timer ticks). Peripheral dividers must be updated accordingly.
+- the `hello_48MHz` sample illustrates calling `set_sys_clock_48mhz()` before peripheral initialization.
 
-Five builds of identical source — host `-O0`, host `-O2`, host with a sanitiser,
-Pico Debug, Pico Release — produce five different behaviours. All five are
-correct behaviour for the code as written. That is the final lesson.
+```c
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "hardware/clocks.h"
 
-Three exercises are required, and they are what this lab's debugger is for:
+int main(void) {
+    // configure system clock to 48 MHz
+    set_sys_clock_48mhz();
 
-- **Find a memory corruption with a data watchpoint.** An entire class of bug is
-  unfindable without one and takes about ninety seconds with one.
-- **Decode a HardFault.** Recover the stacked `PC`, find the faulting
-  instruction, and explain why *this* processor refuses it.
-- **Prove an optimisation defect from the disassembly** — show what the compiler
-  removed, and why it was entitled to.
+    // initialize stdio after clock change so UART baud rate calculates correctly
+    stdio_init_all();
 
-Then, and only then, open [`pid.c`](pid.c) and do the exercise below. It is now
-the last debugging task of the semester rather than the first, and you should
-find it dramatically easier than you would have in week one. That difference is
-the whole point.
+    while (true) {
+        printf("hello 48 MHz clock: current sys_clk = %lu Hz\n", clock_get_hz(clk_sys));
+        sleep_ms(1000);
+    }
+    return 0;
+}
+```
 
-There is no guidance in this hunt at all.
+build & flash (`hello_48MHz`):
 
-> **Start here:** [`bughunt/`](bughunt/) · **Method:** [`../BUGHUNT.md`](../BUGHUNT.md)
+macOS:
+```sh
+# copy hello_48MHz.c from pico examples
+cp ~/pico/pico-examples/clocks/hello_48MHz/hello_48MHz.c .
+# copy CMakeLists from bughunt & patch target to hello_48MHz
+cp bughunt/CMakeLists.txt CMakeLists.txt
+sed -i '' '/bughunt6\.c/d; s/bughunt6_pico\.c/hello_48MHz.c/g; s/bughunt6/hello_48MHz/g; s/pico_stdlib/pico_stdlib hardware_clocks/g' CMakeLists.txt
+# build & flash
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 hello_48MHz
+cp hello_48MHz.uf2 /Volumes/RPI-RP2
+```
+
+windows (powershell):
+```powershell
+# copy hello_48MHz.c from pico examples
+Copy-Item C:\pico\pico-examples\clocks\hello_48MHz\hello_48MHz.c .
+# copy CMakeLists from bughunt & patch target to hello_48MHz
+Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
+(Get-Content CMakeLists.txt) -notmatch 'bughunt6\.c' | Set-Content CMakeLists.txt
+(Get-Content CMakeLists.txt) -replace 'bughunt6_pico\.c', 'hello_48MHz.c' -replace 'bughunt6', 'hello_48MHz' -replace 'pico_stdlib', 'pico_stdlib hardware_clocks' | Set-Content CMakeLists.txt
+# build & flash
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target hello_48MHz
+Copy-Item hello_48MHz.uf2 -Destination D:\
+```
+
+---
+
+## task 3: debugging tools & PicoProbe hardware debugging (pair / 2 boards)
+
+use hardware breakpoints, data watchpoints, memory inspection & register stepping via OpenOCD & GDB.
+
+extra hardware:
+- Pico (flashed with `picoprobe.uf2`)
+- 5x jumper wires (3x SWD: GP2/SWCLK, GP3/SWDIO, GND; 2x UART: GP4/TX, GP5/RX)
+
+target & launch selection in VSCode:
+- configure CMake extension: right click target binary & select "Set as Build Target", then "Set as Launch/Debug Target".
+
+![Set Build & Launch Target](settarget.PNG)
+
+- status bar indicates selected target with hammer (build) & rocket (launch) icons.
+
+![Target Selection Confirmation](selectdebug.png)
+
+- launch debugging session via Run & Debug panel (`F5`). VSCode flashes target via OpenOCD SWD interface & halts at `main()`.
+
+![Active Hardware Debugging Session](debugging.png)
+
+GDB debugging commands:
+```text
+# set line breakpoint
+(gdb) break main
+# set data watchpoint on memory write
+(gdb) watch -l *(uint32_t *)0x20001000
+# inspect call stack frame & registers
+(gdb) backtrace
+(gdb) info registers
+# step over & step into instructions
+(gdb) next
+(gdb) step
+# resume execution
+(gdb) continue
+```
+
+---
+
+## task 4: optimization exercises
+
+implement fast equivalents of 4 computationally expensive functions on RP2040 ARMv6-M architecture.
+
+refer to [optimise/README.md](optimise/README.md) for benchmark specifications, profiling rules & disassembly inspection instructions.
+
+---
+
+## task 5: PID controller debugging (`pid.c`)
+
+correct at least 5 syntax errors & 5 logical errors in `pid.c` against the control algorithm pseudocode.
+
+control algorithm pseudocode:
+```text
+// initialize parameters
+Kp = 1.0, Ki = 0.1, Kd = 0.01
+setpoint = 100.0, current_value = 0.0, integral = 0.0, prev_error = 0.0
+time_step = 0.1, num_iterations = 100
+
+// main simulation loop
+for i = 0 to num_iterations - 1:
+    error = setpoint - current_value
+    integral += error
+    derivative = error - prev_error
+    control_signal = Kp * error + Ki * integral + Kd * derivative
+    prev_error = error
+    motor_response = control_signal * 0.1
+    current_value += motor_response
+    print "Iteration ", i, ": Control Signal = ", control_signal, ", Current Position = ", current_value
+    sleep for time_step
+```
+
+defects to fix in `pid.c`:
+- syntax error 1 (line 32): missing semicolon `;` after variable declaration.
+- syntax error 2 (line 35-47): missing closing curly brace `}` for `for` loop body.
+- syntax error 3 (line 36): passing `prev_error` as float value instead of pointer required by `compute_pid` signature.
+- syntax error 4 (line 44): implicit declaration of `usleep` without `<unistd.h>` header inclusion (or missing Pico SDK `sleep_ms` call).
+- syntax error 5 (line 42): comparison operator `==` used instead of assignment `=`.
+- logical error 1 (lines 5-7): gain constants do not match the pseudocode specification (`Kp = 1.0`, `Ki = 0.1`, `Kd = 0.01`).
+- logical error 2 (line 12): error sign is inverted.
+- logical error 3 (line 18): extraneous derivative scaling factor.
+- logical error 4 (line 20): `prev_error` updated with `current_value` instead of `error`.
+- logical error 5 (line 38): motor response scaling factor mismatch against pseudocode.
+- logical error 6 (line 40): format specifier mismatch in `printf` passing floating-point variable to integer `%d`.
+- logical error 7 (line 44): time step delay conversion truncates fractional seconds to 0 microseconds.
+
+host compilation & verification:
+```sh
+# compile corrected pid.c on host
+gcc -Wall -Wextra -o pid pid.c -lm
+# execute simulation
+./pid
+```
+
+---
+
+## task 6: Bug Hunt #6 (pair / 2 boards)
+
+extra hardware:
+- Pico (flashed with `picoprobe.uf2`)
+- 3x jumper wires
+
+refer to [bughunt readme](bughunt/README.md) for more.

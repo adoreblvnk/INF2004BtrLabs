@@ -1,147 +1,141 @@
-# BUG HUNT #6 — Only the disassembly tells the truth
+# BUG HUNT #6: Telemetry Layer & Low-Level Debugging (pair / 2 boards)
 
-> **Guidance level: none.** A specification, a defect count, and the hardware.
-> This is what the previous five were for.
+fix 12 defects in CRC-8 table generation, LFSR test pattern generation, packet frame parser & sensor delay logic across `bughunt6.c` (hardware debugging exercises require 2 boards / pair).
 
-| | |
-|---|---|
-| **Algorithm** | CRC-8 table, LFSR, frame parser, string formatting |
-| **Defects planted** | **12** — then `../pid.c`, which has at least 10 more |
-| **Runs on** | Laptop and Pico. Some defects exist on only one of them. |
-| **Time** | 90 minutes, plus `pid.c` |
-| **Optional practice notes** | `LOGBOOK.md`, a watchpoint transcript, a fault report |
+extra hardware:
+- Pico (flashed with `picoprobe.uf2`)
+- 3x jumper wires
 
 ---
 
-## The specification
+## test on host first
 
-At the top of [`bughunt6.c`](bughunt6.c). It is correct. The code is not.
+validate algorithmic logic locally before building for target microcontroller.
 
-```bash
+```sh
+# compile host test harness across optimization levels
 gcc -Wall -Wextra -O0 -o bughunt6_host bughunt6_host.c bughunt6.c && ./bughunt6_host
+gcc -Wall -Wextra -O2 -o bughunt6_host bughunt6_host.c bughunt6.c && ./bughunt6_host
+gcc -Wall -Wextra -O3 -o bughunt6_host bughunt6_host.c bughunt6.c && ./bughunt6_host
 ```
-
-Then build it again at `-O2`. Then at `-O3`. Then on the Pico, at `Debug` and at
-`Release`. Record the five outcomes; they need not all differ. For a Pico `-O0`
-build add `-DPICO_DEOPTIMIZED_DEBUG=1`, because Debug normally uses `-Og`.
-For source-level Release disassembly, also pass
-`-DCMAKE_C_FLAGS_RELEASE="-O3 -g -DNDEBUG"`.
 
 ---
 
-## Three debugging exercises
+## defects to fix (12 total)
 
-These are ungraded practice. Try each instrument and record what you observe.
-Several defects can also be found by reading, warnings or sanitizers.
+1. line 50 (`bughunt6.c`): `crc_table` declared with 255 entries (`uint8_t crc_table[255]`) instead of 256. Initialization loop writes index 255 past the end of the array into adjacent static memory. Allocate 256 elements.
+2. line 67 (inside `crc8`): uninitialized accumulator variable `crc`. Local variable contains undefined stack data upon function entry. Initialize accumulator explicitly to `0x00`.
+3. line 54 & 65 (`crc_init` & `crc8`): table readiness flag `crc_ready` is updated during `crc_init` but never checked inside `crc8`. Calling `crc8` prior to explicit initialization performs lookups against an uninitialized zero table. Trigger lazy table initialization on first use.
+4. line 47 (`LFSR_TAPS` macro): incorrect 16-bit LFSR feedback polynomial mask (`0xB000u`). Fails to generate the maximal 65535-cycle sequence. Update tap mask to `0xB400u` for maximal length Galois sequence.
+5. line 93 (inside `lfsr_period`): loop termination condition artificially capped at `n < 200`. The 16-bit generator cannot complete its full 65535-state cycle within 200 iterations. Expand iteration boundary to check full $2^{16} - 1$ states while retaining a runaway timeout.
+6. line 106 (inside `parse_ts`): type punning via pointer cast (`*(uint32_t *)&frame[2]`). Causes an unaligned 32-bit word load on ARMv6-M (generating a HardFault exception on Cortex-M0+) & decodes little-endian rather than big-endian wire format. Assemble the 32-bit timestamp explicitly using bitwise shifts over 4 bytes.
+7. lines 111 & 114 (inside `parse_frame`): inadequate frame header & buffer length validation. Minimum length check allows short frames, & parser fails to verify that payload length equals 6 while total frame length equals 9 before computing checksum. Reject frames with invalid lengths or malformed start-of-frame markers.
+8. lines 128-132 (inside `format_reading`): returns pointer to local stack-allocated array `buf[32]`. The stack frame is destroyed upon function return, leaving a dangling pointer & undefined memory contents. Use persistent static storage or caller-provided destination buffers.
+9. line 136 (inside `label_for`): dynamic memory allocation allocates `strlen(name)` bytes without accounting for the string null terminator. `strcpy` writes the null byte out of bounds into heap metadata. Allocate `strlen(name) + 1` bytes & verify allocation success.
+10. line 147 (inside `calibration_delay`): empty loop `for (uint32_t i = 0; i < 6000; i++) ;` has no observable side-effects. Compiler dead-code elimination removes the loop entirely under `-O2` & `-O3`. Use hardware timer delay functions (`sleep_us(500)` on target or POSIX monotonic sleep on host).
+11. line 154 (`conversion_done`): ISR completion flag lacks `volatile` type qualifier. The compiler assumes the flag cannot change asynchronously inside `wait_for_conversion` & optimizes the loop into an infinite register check. Mark flag `static volatile bool conversion_done`.
+12. line 174 (inside `checksum_all`): loop counter `uint8_t i` overflows at 255. When summing buffers longer than 255 bytes (such as the 300-byte test buffer), the 8-bit index wraps to 0, resulting in an infinite loop. Use `uint16_t` or `size_t` for the index variable.
 
-### A. Find a corruption with a data watchpoint
+---
 
-Somewhere this program writes beyond an array. Locate the suspect array using
-warnings or a sanitizer, then catch the write in a Pico Debug build. The address
-after an array might be padding, not another named variable; inspect the map
-rather than assuming that declarations are adjacent in memory.
+## 3 hardware debugging exercises
 
-Set a **data watchpoint** (a hardware breakpoint on *write access to an address*,
-not on a line of code):
+### exercise A: catch buffer overflow with GDB data watchpoint
 
-```
-(gdb) watch -l *(unsigned char *)<suspect_address>
+locate the out-of-bounds write occurring in `crc_init` on target hardware.
+
+```text
+# start gdb session & break before table initialization
+(gdb) break crc_init
+(gdb) continue
+# set hardware data watchpoint on the byte immediately following the table
+(gdb) watch -l *(unsigned char *)((char *)&crc_table + sizeof(crc_table))
 (gdb) continue
 ```
 
-The Cortex-M0+ has a small number of these in silicon. The debugger will stop the
-processor at the exact instruction that performed the write, and you can then
-look at the call stack to see who did it.
+GDB halts execution at the exact instruction attempting to write index 255 out of bounds.
 
-**Save a transcript**: the watchpoint firing, the old and new values, and
-the line of code that turned out to be responsible.
+### exercise B: decode ARMv6-M HardFault on unaligned word load
 
-> This is the single highest-value debugging technique on this course. An entire
-> class of bug — one module quietly writing over another module's memory — is
-> essentially unfindable without it, and takes about ninety seconds with it.
+Cortex-M0+ lacks unaligned memory access support present in Cortex-M3/M4 cores.
+- when `parse_ts` executes `*(uint32_t *)&frame[2]`, the address is offset by 2 bytes from a 4-byte boundary.
+- the processor immediately triggers a HardFault exception & stacks 8 registers: `R0, R1, R2, R3, R12, LR, PC, xPSR`.
+- inspect stacked `PC` via GDB (`info registers` or examining `MSP`/`PSP` memory) & locate the faulting `LDR` instruction in disassembly (`arm-none-eabi-objdump -d bughunt6.elf`).
 
-### B. Decode a HardFault
+### exercise C: prove optimization defects from disassembly
 
-One defect can fault the processor on an unaligned word load. If earlier defects
-prevent reaching it, fix those and repeat. When it faults, **do not press reset**.
-A HardFault is not a crash to be recovered from; it is a report, and the
-processor has already written it down for you.
+compare emitted assembly between Debug (`-O0` / `-Og`) & Release (`-O3`) builds.
 
-On entry to the fault handler, the Cortex-M0+ has stacked eight registers:
-`R0 R1 R2 R3 R12 LR PC xPSR`. The stacked `PC` is the address of the instruction
-that faulted.
-
-1. Find the stacked `PC`. (`LR` on fault entry tells you which stack pointer was
-   in use — `MSP` or `PSP` — and the stacked frame is at the top of that stack.)
-2. Look that address up in the disassembly:
-   `arm-none-eabi-objdump -d bughunt6.elf`
-3. Identify the instruction and the C line it came from.
-4. Explain why *that* instruction is illegal **on this processor**, when the same
-   C compiles and runs perfectly on your laptop.
-
-The answer is in the ARMv6-M Architecture Reference Manual, and it is a property
-of the Cortex-M0+ that the Cortex-M4 in many other boards does not share. This is
-why "it worked on the other dev board" is not evidence of anything.
-
-**Save a fault report**: faulting address, instruction, C line, and cause.
-
-### C. Prove an optimisation defect from the disassembly
-
-Compare the delay and acquisition-wait functions at `-O0` and `-O3`. Their
-symptoms depend on optimization. For **one** of them:
-
-```bash
-arm-none-eabi-objdump -d build-debug/bughunt6.elf   > debug.asm
+```sh
+arm-none-eabi-objdump -d build-debug/bughunt6.elf > debug.asm
 arm-none-eabi-objdump -d build-release/bughunt6.elf > release.asm
 ```
 
-Find the same function in both. Show the instructions that are present in one and
-absent in the other, and explain what the compiler proved in order to justify
-removing them.
-
-Then explain why the compiler was entitled to do it. In every case the answer is
-the same shape: **you wrote something that the C standard leaves undefined, or
-you failed to tell the compiler a fact it had no way to discover.** The compiler
-is not your adversary. It is a very literal reader of a contract you did not read
-as carefully as it did.
-
-**Save the disassembly extracts**, annotated.
+- inspect `calibration_delay`: in Debug build, loop counter decrements & branches exist; in Release build, the function collapses to a single `bx lr` return instruction.
+- inspect `wait_for_conversion`: in Release build without `volatile`, the compiler loads `conversion_done` into a register once before the loop & branches to itself forever (`b .`).
 
 ---
 
-## Then: `pid.c`
+## build & flash to Pico W
 
-When all twelve are fixed and the harness prints
-`TELEMETRY LAYER MATCHES THE SPECIFICATION`, open [`../pid.c`](../pid.c) and do
-the original Lab 6 exercise: at least five syntax errors and at least five
-logical errors, against the pseudocode in the [lab brief](../README.md).
+macOS:
+```sh
+# copy pico sdk import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# build debug target
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 bughunt6
+# flash to Pico W via bootsel
+cp bughunt6.uf2 /Volumes/RPI-RP2
+# open serial monitor
+screen /dev/tty.usbmodem* 115200
+```
 
-You have met several of its defects already this semester. One of them is
-exactly the `printf` format defect from Bug Hunt #4. Another is a comparison
-operator doing something other than what it looks like. You should find them
-considerably faster than you would have in week one — and if you do, that
-speed *is* the thing this whole ladder was built to give you.
+windows (powershell):
+```powershell
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target bughunt6
+Copy-Item bughunt6.uf2 -Destination D:\
+```
 
 ---
 
-## Reflect on your attempt
+## expected output
 
-- `LOGBOOK.md`, at least **twelve** defect rows plus `pid.c`, plus your
-  hypothesis trail — including the wrong hypotheses.
-- The watchpoint transcript (exercise A).
-- The fault report (exercise B).
-- The annotated disassembly extracts (exercise C).
-- In the reflection, answer these two:
+```text
+BUG HUNT #6 - telemetry layer
 
-> 1. Rank the twelve defects by how long each took you to find. Is that ranking
->    correlated with how *serious* each one is? What does your answer imply about
->    where testing effort should go?
->
-> 2. Six hunts ago you were fixing a missing semicolon. Describe one thing you now
->    do automatically that you did not do in week one — a habit, a flag, a check,
->    a reflex — and name the defect that taught it to you.
+  crc8 before explicit init          got 244          expect 244          ok
+crc8 - reference vector for CRC-8/ATM
+  crc8("123456789", 9)               got 244          expect 244          ok
+  crc8("123456789", 9) again         got 244          expect 244          ok
 
-## After your attempt
+lfsr - must visit every non-zero 16-bit value
+  lfsr_period()                      got 65535        expect 65535        ok
 
-This is ungraded practice; the logbook and reflection prompts are optional.
-Compare your reasoning with the separate [answer guide and corrected source](../../answers/bughunt6/README.md).
+parse_frame
+  timestamp                          got 287454020    expect 287454020    ok
+  value                              got 1800         expect 1800         ok
+  feeding a frame whose length byte says 200...
+
+format_reading
+  returned: "t=42 v=7"  (expect "t=42 v=7")
+
+label_for
+  returned: "temperature"  (expect "temperature")
+
+calibration_delay - datasheet requires at least 500 us
+  measured 500.00 us per call
+  (this number is meaningless on your laptop - measure it on the Pico,
+   at -O0 & at -O3, & explain the difference)
+
+checksum_all
+  summing 300 bytes of value 1, expecting 300...
+  checksum_all(big, 300)             got 300          expect 300          ok
+
+TELEMETRY LAYER MATCHES THE SPECIFICATION  (0 failures)
+```

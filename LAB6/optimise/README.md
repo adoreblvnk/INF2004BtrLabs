@@ -1,131 +1,111 @@
-# EXERCISE — Four things that are slower than they need to be
+# EXERCISE: Code Optimization on RP2040
 
-The old version of this exercise said, in full:
-
-```c
-// Apply optimizations (you can add your optimizations here)
-```
-
-This is that sentence, made specific.
+4 computationally expensive functions; implement fast equivalents preserving bit-exact numerical correctness across ARMv6-M architectural constraints.
 
 ---
 
-## What you are doing
+## core architectural constraints (ARMv6-M / Cortex-M0+)
 
-Four functions come in pairs. The `_slow()` version is written for you and
-**works** — it is not buggy, it is merely expensive. You write the `_fast()`
-version.
-
-| # | Function | The thing to notice |
-|---|---|---|
-| 1 | `mv_convert` | ADC counts → millivolts, in floating point, on a core with no FPU |
-| 2 | `count_in_band` | An expensive call whose arguments never change, inside the loop |
-| 3 | `crc8` | Eight iterations per byte, when there is a way to do one |
-| 4 | `normalise` | `n` divisions by the same number, on a core with no divide instruction |
-
-Read the specification at the top of [`optimise.h`](optimise.h) before you start.
+why host performance benchmarks diverge from RP2040 target microcontroller execution:
+- no hardware floating-point unit (FPU): all `float` & `double` operations invoke software emulation routines (`__aeabi_fadd`, `__aeabi_dmul`, `__aeabi_d2uiz`). A single floating-point multiplication requires tens to hundreds of CPU cycles compared to 1 cycle on modern host x86_64 / ARM64 processors.
+- no hardware divide instruction: ARMv6-M lacks `UDIV` & `SDIV` instructions. Non-constant integer divisions (`/`) & modulo operations (`%`) compile into runtime library calls (`__aeabi_uidiv`). While RP2040 includes a hardware divider in its SIO peripheral block, hardware register access remains significantly slower than single-cycle integer multiplication (`MULS`).
 
 ---
 
-## The rules
+## 4 optimization pairs
 
-**1. The answer may not change.** `_fast()` must return exactly what `_slow()`
-returns, element by element, for every input the harness tries. The harness
-checks correctness **before** it prints a single timing, and refuses to time
-anything that fails. An optimisation that changes the answer is not an
-optimisation, it is a defect that happens to run quickly.
+summary of benchmark functions & optimization strategies:
 
-**2. You may not touch the `_slow()` versions, the harness, or the test data.**
-Making the benchmark easier is not making the code faster.
+| # | Function | Slow mechanism | Fast optimization | Architectural bottleneck |
+|---|---|---|---|---|
+| 1 | `mv_convert` | `double` precision arithmetic per sample | 32-bit unsigned integer scaling arithmetic | software FPU emulation calls |
+| 2 | `count_in_band` | expensive non-inlined function calls inside loop | hoist invariant threshold calculations outside loop | redundant function call overhead & pipeline stalls |
+| 3 | `crc8` | bitwise bit-by-bit shifting (8 iterations/byte) | 256-entry precomputed table lookup (1 access/byte) | loop branching & serial bit extraction |
+| 4 | `normalise` | software integer division per buffer element | division hoisting / fixed-point reciprocal multiplication | missing ARMv6-M `UDIV` hardware instruction |
 
-**3. Report three things per function**, not one:
+### 1. ADC millivolt conversion (`mv_convert`)
 
-- **microseconds before and after, measured on the Pico** — not on your laptop;
-- **why**, in one sentence naming the actual mechanism;
-- and for at least one of the four, a **disassembly extract** proving it.
+convert 12-bit ADC raw counts ($0 \dots 4095$) to millivolts ($0 \dots 3300\text{ mV}$) via integer arithmetic.
+- slow implementation casts each raw count to `double`, computes `(raw[i] * 3300.0) / 4095.0`, & casts back to integer.
+- fast implementation performs pure integer multiplication & division: `((uint32_t)raw[i] * 3300u) / 4095u`.
+- intermediate integer range: maximum product is $4095 \times 3300 = 13,513,500$, which fits comfortably within a standard unsigned 32-bit integer (`uint32_t` maximum is $4,294,967,295$), avoiding arithmetic overflow.
 
-> A number without a mechanism is a measurement, not an explanation.
-> A mechanism without a number is a belief.
+### 2. loop invariant hoisting (`count_in_band`)
+
+hoist invariant threshold computations out of the sample processing loop.
+- slow implementation repeatedly calls non-inlinable calibration functions `calib_low(cal)` & `calib_high(cal)` inside every iteration of an $N$-element loop ($2N$ function calls total).
+- fast implementation computes `uint16_t low = calib_low(cal);` & `uint16_t high = calib_high(cal);` exactly once prior to the loop, reducing function calls from $2N$ to 2.
+
+### 3. table-driven CRC-8 (`crc8`)
+
+replace bitwise polynomial division loops with a precomputed 256-entry lookup table.
+- slow implementation processes data byte-by-byte with an inner loop running 8 iterations per byte (checking MSB & XORing with polynomial `0x07`).
+- fast implementation initializes a 256-entry lookup table once (`static uint8_t table[256];`) & performs 1 table lookup per input byte: `crc = table[crc ^ data[i]];`.
+- memory vs speed trade-off: table-driven CRC-8 requires 256 bytes of SRAM or Flash memory. In exchange, execution time drops by approximately $8\times$. On memory-constrained microcontrollers (e.g. ATtiny10 with 32 bytes of SRAM, or PIC microcontrollers with 128 bytes RAM), allocating 256 bytes for a lookup table is unacceptable & the bit-by-bit approach must be retained.
+
+### 4. reciprocal fixed-point normalisation (`normalise`)
+
+normalize buffer elements to permille ($0 \dots 1000$) by computing total sum once & replacing repeated divisions.
+- slow implementation computes buffer sum `total`, then executes `out[i] = (raw[i] * 1000) / total` for all $N$ elements, invoking $N$ division operations.
+- fast implementation computes `total` once. If `total == 0`, zeros output buffer immediately. For non-zero `total`, precomputes a 64-bit reciprocal fixed-point multiplier `uint64_t inv = ((1ULL << 32) * 1000ULL) / total;` & computes each sample using multiplication & right shift: `out[i] = (uint16_t)(((uint64_t)raw[i] * inv) >> 32);` (or leverages integer division optimization).
+- numerical precision constraint: fixed-point implementations must match the integer truncation of the slow version across all test vectors without a single LSB discrepancy.
 
 ---
 
-## Why this processor makes these choices matter
+## test on host first
 
-The RP2040 has two Cortex-M0+ cores, and two facts about that core drive three
-of these four exercises. Neither is true of the laptop you have been testing on
-all semester:
+verify algorithmic correctness across all test vectors before profiling execution speed on microcontroller.
 
-- **There is no floating-point unit.** Every `float` and `double` operation is a
-  call into a software library — tens to hundreds of cycles for something that
-  costs one cycle on your machine.
-- **There is no hardware divide instruction.** ARMv6-M has no `SDIV` or `UDIV`.
-  Every `/` and `%` the compiler cannot fold into a shift becomes a call to
-  `__aeabi_uidiv`. (The RP2040 does have a hardware divider in its SIO block and
-  the SDK will use it — but a division is still far more expensive than a
-  multiply.)
-
-This is why *"it was fast enough on my machine"* is not evidence.
-
----
-
-## Order of work
-
-**1. Correctness, on your laptop.**
-
-```bash
+```sh
+# compile host test harness
 gcc -O2 -Wall -Wextra -o optimise_host optimise_host.c optimise.c
+# run correctness checks
 ./optimise_host
 ```
 
-The stubs as shipped call the slow versions, so they start out correct and
-exactly as fast — every row says `no change`. That is your baseline.
+---
 
-Two of these are much harder to get *exactly* right than to get *approximately*
-right, and the harness is unforgiving on purpose. In particular: a 16.16
-fixed-point reciprocal in `normalise_fast` is **not** precise enough. It
-disagrees with the slow version on twelve elements. Finding out that your clever
-version is subtly wrong is the single most valuable thing this exercise does for
-you, because in real work nobody hands you a harness.
+## build & measure on Pico W
 
-**2. Timing, on the Pico.** Build with the `CMakeLists.txt` here and run
-[`optimise_pico.c`](optimise_pico.c), which is complete and which you should not
-modify. It is the instrument, and an instrument you have adjusted until it gave
-the reading you wanted is not an instrument.
+profile execution durations on RP2040 across 3 optimization levels (`-O0`, `-O2`, `-O3`).
 
-**3. Three optimisation levels.** Build at `-O0`, `-O2` and `-O3` and report all
-three. Some of your hand optimisations will turn out to be things the compiler
-was already doing at `-O2`. **Finding out which ones is most of the exercise** —
-an "optimisation" that only helps at `-O0` is not an optimisation, it is you
-doing unpaid work on the compiler's behalf.
+macOS:
+```sh
+# copy pico import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# build target at -O2
+mkdir -p build-O2 && cd build-O2
+cmake -DPICO_BOARD=pico_w -DCMAKE_BUILD_TYPE=Release ..
+make -j8 optimise
+# flash to Pico W
+cp optimise.uf2 /Volumes/RPI-RP2
+# monitor timing output
+screen /dev/tty.usbmodem* 115200
+```
 
-```bash
+windows (powershell):
+```powershell
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+New-Item -ItemType Directory -Force -Path build-O2
+cd build-O2
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" -DCMAKE_BUILD_TYPE=Release ..
+cmake --build . --target optimise
+Copy-Item optimise.uf2 -Destination D:\
+```
+
+inspect compiler-generated disassembly:
+```sh
+# disassemble target binary to inspect instructions
 arm-none-eabi-objdump -d build-O2/optimise.elf > O2.asm
 ```
 
 ---
 
-## A question you must answer for #3
+## deliverables & reporting requirements
 
-The table-driven CRC has a **price**, and it is not paid in time. Say what it
-costs, in bytes, and name a device on which you would refuse to pay it. "It is
-faster" is half an answer; every optimisation in this list is a trade, and an
-engineer who can only see the side of the trade they like is the one who fills
-your flash and then wonders where it went.
-
----
-
-## Hand in
-
-- `optimise.c`, passing every correctness check, building clean under
-  `-Wall -Wextra`.
-- A table: four functions × three optimisation levels × before/after
-  microseconds, measured on the Pico.
-- One sentence per function naming the mechanism.
-- One annotated disassembly extract.
-- Your answer to the CRC trade-off question above.
-- **One row for anything that did not get faster**, with your explanation of
-  why. Compare your `-O0` numbers against your `-O2` ones before you claim
-  credit: where the gap closes as the optimisation level rises, the compiler was
-  already doing what you did by hand. Reporting that honestly is worth more than
-  a speedup, and claiming a speedup the numbers do not show is the one thing
-  here that cannot be recovered from.
+record the following findings in your submission:
+1. benchmark timing table: execution times (in microseconds) for all 4 functions across `-O0`, `-O2` & `-O3` optimization levels on RP2040.
+2. optimization mechanisms: 1 concise sentence per function explaining the exact architectural mechanism delivering the speedup.
+3. disassembly analysis: 1 annotated disassembly extract proving the compiler transformation (e.g. elimination of `__aeabi_dmul` calls or hoisted loop branches).
+4. memory vs speed trade-off explanation: byte cost of the CRC-8 lookup table & an example device architecture where this trade-off would be rejected.
+5. compiler vs manual optimization comparison: document any instances where `-O2`/`-O3` compiler optimization closed the performance gap between slow & fast code without manual intervention.

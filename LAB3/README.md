@@ -1,208 +1,229 @@
 # LAB 3: Interrupts & Timers
 
-**OBJECTIVES**
--	Learn the difference between polling and interrupts
--	Configure and implement hardware Interrupts
--	Configure and implement various Timer
--	Understand how to configure the HC020K IR Wheel Encoder & HCSR04P Ultrasonic sensor
-
-
-**EQUIPMENT** 
-1.	A laptop that has the Pico C/C++ SDK installed
-2.	Raspberry Pico W
-3.	Micro-USB Cable
-4.	4-Wire Groove Cable
-
-> [NOTE]
-> Only students wearing fully covered shoes and long pants are allowed into the lab due to safety concerns.
-
-## **INTRODUCTION** 
-
-Embedded systems can interact with their surrounding environment in many ways. Whether sensing or actuating, there are two primary mechanisms initiating actions: event-triggered and time-triggered. In this lab, we will first learn how to use interrupts, the building blocks for event-triggered functionality. Lastly, we will build code that uses interrupts that the IR sensor can use as a wheel encoder.
-
-Subsequently, we shall learn how to use time-triggered events known as Timers. A timer is a specialised type of clock used to measure time intervals. A timer that counts from zero upwards for measuring the time elapsed is often called a stopwatch. It is a device that counts down from a specified time interval and generates a time delay. A timer can also be used as a counter that keeps track of the number of times a particular event or process occurred regarding a clock signal. It is used to count the events happening outside the microcontroller. 
-
-## **HARDWARE INTERRUPTS** 
-
-A hardware interrupt is an electronic signal that alerts the microprocessor of an event. An interrupt can be triggered by either an internal peripheral (e.g. timer) or an external device (e.g. button).
-
-In the previous lab session, polling was used to detect when a button was pressed. When polling is used, the microprocessor repeatedly checks whether the event has occurred. In the case of a button, the value of the GPIO pin is read to determine if it is high (unpressed) or low (pressed). Once the button is pressed, the microprocessor detects it quickly since it is always active and does nothing but check this single condition, as shown in Figure 1 (bottom). 
-
-While polling is a simple way to check for state changes, there's a cost, and the cost is a trade-off you have to choose a point on. If the checking interval is **longer**, there can be a long lag between the event occurring and your code detecting it, and you may fail to see the change entirely if the state changes back before you next check. If the interval is **shorter**, detection is faster and more reliable, but you consume more processing time and more power, because many more checks return negative. There is no interval that is good at both, which is the whole argument for interrupts.
-
-An alternative is configuring an interrupt on the button's GPIO pin so that an interrupt is generated when a pre-configured trigger condition is met. With this approach, the microprocessor can enter a low-power sleep state and be woken up with the interrupt. The Pico can detect signal changes (e.g. rising or falling edges) to generate an interrupt. If a GPIO pin is configured to be pulled up, a falling edge will occur when the button is pressed, pulling the pin to the ground. Interrupts are thus better suited to handle asynchronous events.
-
-<img src="https://www.renesas.com/sites/default/files/inline-images/fig1-interrupts-vs-polling-en.jpg" width=80% height=80%>
-
-A dedicated or grouped interrupt is triggered, depending on the source of the interrupt. For peripherals like GPIO ports, multiple pins could produce the same interrupt. In these cases, it is necessary to query the pin's interrupt vector register to identify the interrupt's exact source. Typically, this is done inside the ISR. Once an ISR identifies the source of the interrupt, it can react accordingly. Typically, ISRs execute in a privileged mode that can mask other interrupts. Hence, ISR should be as short as possible and only set application-specific flags to indicate to the microprocessor's main thread to execute the corresponding task in response to an interrupt.
-
-## **GPIO INTERRUPT REQUEST**
-
-We will be exploring the [hello_gpio_irq.c](https://github.com/raspberrypi/pico-examples/blob/master/gpio/hello_gpio_irq/hello_gpio_irq.c) sample code designed for the Pico W. In this session, we'll merge our knowledge of GPIO with the concept of interrupts. Instead of the previous lab's approach, where we continuously polled the GPIO pin status using the `while(true)` statement, we'll now integrate interrupts. This will allow us to trigger the interrupts based on the desired state, whether edge-triggered or level-triggered. In this example, edge-triggered has been chosen. How would you change it to level-triggered? 
-
-To test the code, you must connect the GP02 pin to 3.3V while observing the output on the Serial Monitor. Can you identify the function that sets GP02? In the [CMakeLists.txt](https://github.com/raspberrypi/pico-examples/blob/master/gpio/hello_gpio_irq/CMakeLists.txt), __ensure__ that the following line has been added `pico_enable_stdio_usb(hello_gpio_irq 1)`. In addition, `stdio_init_all()` should also be included in your main() function.
-
-> [NOTE]
-> Switching to trigger at a low-level (GPIO_IRQ_LEVEL_LOW) could lead to the software crashing (not working). Why?
-
-### An aside worth having: what is `&gpio_callback`?
-
-Look closely at the call that arms the interrupt:
-
-```c
-gpio_set_irq_enabled_with_callback(2, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
-```
-
-Three of those arguments are ordinary values — a pin number, a bitmask, a
-boolean. The fourth is a **pointer to a function**. You are not calling
-`gpio_callback` here; you are handing the SDK its *address* so that the SDK can
-call it later, at a moment neither you nor it can predict.
-
-That is a **callback**, and the type has a name:
-
-```c
-typedef void (*gpio_irq_callback_t)(uint gpio, uint32_t events);
-```
-
-Read it from the inside out: `gpio_irq_callback_t` is a pointer to a function
-taking a `uint` and a `uint32_t` and returning `void`. Any function with that
-exact signature can be stored in a variable of that type, passed as an argument,
-or put in an array — functions are data here, in a way they never were in your
-first C course.
-
-This matters for three reasons, and all three show up later in this module:
-
-1. **It is how a library calls your code.** The SDK was compiled long before
-   your program existed. It cannot contain a call to `gpio_callback`, because
-   that name did not exist yet. A pointer is the only way to close that gap, and
-   it is why every driver, RTOS and framework you will ever use is full of them.
-2. **The signature must match exactly.** A callback with the wrong parameter
-   list still compiles in some situations and then corrupts the stack when the
-   hardware calls it. Bug Hunt #6 has a defect of exactly this shape.
-3. **The compiler cannot see the call.** Nothing in your source calls
-   `gpio_callback`; the hardware does. That is precisely why the variables it
-   touches need `volatile` — a subject Bug Hunt #3, below, is entirely about.
-
-You do not have to write one this week. You do have to be able to say what the
-`&` is doing, because from here on the answer "it's a callback" stops being an
-acceptable end to the sentence.
-
-## **IR-BASED WHEEL ENCODER**
-
-<img src="img/irwheelencoder.PNG" width=30% height=30%>
-
-The working principle of the encoder (shown above) is illustrated in the image below. It uses a slotted wheel with a single LED and photodetector pair that generate pulses as the wheel turns, and the speed of an object can be calculated by measuring the pulse duration Δti  (i.e. elapsed time or period of a pulse) between successive pulses. It comprises three connections: GND, VCC and OUT. GND and VCC supply power to the module (in our case, via the Pico's GND and 3.3V pins), while OUT generates the square-pulse signal. Connecting the GP02 from the Pico to the OUT of the IR-Sensor will allow the Pico to detect when the wheel is turning.
-
-<img src="img/encoder.png" width=50% height=50%>
-
-
-You may now change the callback function to convert this code into the wheel encoder driver. To measure distance, count each time the notch has been detected (Hint: Use edge-triggered). To measure speed, you will need to measure the pulse width.
-
-<img src="img/irpico.png" width=70% height=70%>
-
-## **TIMERS**
-
-The RP2040 found in the Pico features a flexible timer system that can be used for various applications. Here is a brief description of its timer system, focusing on timer modes, input capture, and output compare:
-
-1. **Timer Modes:**
-    - **Free Running Mode:** In this mode, the timer simply counts from 0 to its maximum value and then wraps around to start counting again.
-    - **Periodic Mode:** In this mode, the timer counts up to a predefined value (ALARM0, for instance) and then restarts from zero. This can be used to generate periodic interrupts or events.
-    - **One-Shot Mode:** In this mode, the timer counts up to a predefined value and then stops. It's useful for creating a single delay or measuring an event of a known duration.
-
-2. **Input Capture:**
-    - Input capture is used to measure the time duration of an external event. For example, it can measure the duration of a pulse on a pin.
-    - When the event occurs (like a rising or falling edge on a pin), the current timer value is 'captured' and stored in a register.
-    - By comparing consecutive captured values, you can determine the duration of the event or the period between events.
-    - The RP2040 timer can be configured to generate an interrupt when such capture occurs, which allows the CPU to process the captured value or take action based on the event.
-
-3. **Output Compare:**
-    - Output compare generates an event (like toggling a pin) at a specific timer value.
-    - You set a value in a compare register, and an action can be triggered when the timer counts up to that value.
-    - The action can be as simple as generating an interrupt or as complex as toggling a GPIO pin, generating PWM signals, etc.
-    - This feature can be very useful in applications like motor control, where precise timing of events is crucial.
-
-It's also worth noting that the RP2040 timer system provides multiple alarm (compare) registers, allowing multiple compare values to be active simultaneously. This multi-alarm capability can be particularly useful in applications requiring various events to happen simultaneously without constant CPU intervention. To make full use of the timer capabilities, you should take a look at the RP2040 datasheet and SDK, which will provide more detailed information and examples on how to configure and use the timers.
-
-## **Periodic vs Single-shot**
-
-This example [hello_timer.c](https://github.com/raspberrypi/pico-examples/blob/master/timer/hello_timer/hello_timer.c) illustrates how to configure a single-shot and a periodic-based timer that is used to trigger an interrupt. This interrupt will then trigger a function to perform the user-defined code. Changing the `delay_ms` parameter in the `add_repeating_timer_ms` API call can trigger different behaviours. Observe the starting time at each call.
-
-The image below illustrates two different configurations for the periodic timer used in the sample code above.
-<img src="img/periodic.png" width=70% height=70%>
-
-## **HOW DOES THE ULTRASONIC HC-SR04P WORK**
-
-<img src="img/ultrasonic.png" width=50% height=50%>
-
-1. **Initiation**: A short high pulse, typically around 10 microseconds in duration, is applied to the "Trigger" pin of the HC-SR04 module to initiate a measurement.
-2. **Ultrasonic Pulse Emission**: Once triggered, the HC-SR04 responds by emitting a burst of eight ultrasonic pulses at approximately 40 kHz. These sound waves travel through the air, radiating outward from the module's transmitter.
-3. **Reflection and Reception**: If an object is present within the sensor's detection range, the emitted ultrasonic waves will bounce off that object's surface and reflect toward the module. The module's ultrasonic receiver, or the "Echo" pin, detects these reflected sound waves. The duration for which the "Echo" pin stays high is directly proportional to the time it takes for the emitted ultrasonic waves to hit an object and return.
-4. **Distance Derivation**: The time measured from the emission of the ultrasonic pulse to its reception (the round trip) can be used to derive the distance to the object. Given that, we know the speed of sound in air (approximately 343 meters per second or 1125.33 feet per second at room temperature), the formula to calculate this distance is: <img src="img/distance.png" width=25% height=25%> The division by two accounts for the round trip of the sound waves; we need the time for just one way to determine the distance to the object.
-
-<img src="img/hcsr04pico.png" width=70% height=70%>
-
-## **SAMPLE CODE FOR ULTRASONIC HC-SR04P**
-
-[`ultrasonic.c`](ultrasonic.c) uses nothing but GPIO and delays to fire the
-trigger, time the echo, and convert that to a distance. It is adapted from
-[KleistRobotics/Pico-Ultrasonic](https://github.com/KleistRobotics/Pico-Ultrasonic),
-and it is the naive implementation on purpose — the same job done properly, with
-interrupts and timers, is what the rest of this lab is for.
-
-**Three defects are planted.** One stops it compiling; two let it compile and
-give you a plausible-looking wrong number, which is worse. Everything you need
-to find all three is in this README:
-
-- the compiler error does **not** point at the defective line. Read upward from
-  where it complains, exactly as you did in Bug Hunt #1;
-- the trigger sequence is spelled out in step 1 of *"How does the ultrasonic
-  HC-SR04P work"* above. Check the code against it, line by line;
-- so is the distance formula, including **why it is divided by two**. Check that
-  too.
-
-**Separately from the defects, this code has a design flaw**, and it is the more
-interesting problem. The two `while` loops inside `get_pulse_us()` are
-**block-waiting**: the processor sits and spins, doing nothing else, until the
-pin changes. Three questions to answer in your logbook:
-
-1. How long does the processor spend inside those loops for an object 2 m away?
-   (Work it out from the speed of sound; you do not need the sensor to answer.)
-2. What happens if the echo never arrives at all — the object is out of range,
-   or the sensor is unplugged? Trace the code and say precisely where it ends up.
-3. Your stopwatch from the exercise below has to keep counting while this
-   measurement is in progress. Can it? What would you change so that it can?
-
-Question 2 is the one that matters. **Fix the three defects, then answer it**,
-because "it hangs forever" is a defect a customer finds and you did not.
-
-> [NOTE]: HC-SR04P and HC-SR04+ both supports 3.3V microcontroller such as Pi Pico and ESP32. However, HC-SR04 is a 5V based sensor and can only be used on an Arduino Uno and **NOT** on a Pi Pico and ESP32.
-
-## **EXERCISE**
-
-The objective is to develop a simple stopwatch application. The stopwatch will be controlled by a single button on **GP21**. **Pressing and holding** this button starts the timer, and the elapsed time in seconds will be continuously displayed on the Serial Monitor. **Releasing** the button stops the timer and resets the displayed time to zero. To ensure a smooth user experience and accurate timekeeping, the **GP21** button input will be **debounced**, and **timer interrupts** must be employed.
+hardware interrupts, periodic timers, IR encoder pulse measurement, ultrasonic ranging & debounced stopwatch on Raspberry Pi Pico W.
 
 ---
 
-## **BUG HUNT #3 — Works in Debug, hangs in Release**
+## hardware overview
 
-The third [Bug Hunt](../BUGHUNT.md), and the one where debugging stops being
-straightforward. The algorithm is the **wheel-encoder driver** from this lab,
-built out into a proper edge state machine with debounce and pulse-width timing.
+Raspberry Pi Pico W & peripheral sensor components.
 
-**Eight defects** are planted. Four are ordinary logic errors. Three are
-**Heisenbugs** — faults that change or disappear when you try to observe them,
-because your instrument is disturbing the very timing you are measuring. One of
-them is caused by the `printf` you added to find it.
+![Raspberry Pi Pico W Pinout](https://www.raspberrypi.com/documentation/microcontrollers/images/picow-pinout.svg)
+- Raspberry Pi Pico W: RP2040 microcontroller, dual-core ARM Cortex-M0+, 264 KB SRAM, 26 multifunction GPIO pins (3.3V logic) & CYW43439 wireless chip.
 
-Two things happen for the first time in this hunt:
+![IR Wheel Encoder Module](img/irwheelencoder.PNG)
+- HC020K optical slot sensor: 3.3V VCC, GND & OUT phototransistor signal generating digital square pulses from slotted rotating disc.
 
-- **The build configuration is part of the bug.** You will compile identical
-  source at `-O0` and `-O2`, find that only one of them works, and prove why from
-  the disassembly.
-- **`printf` becomes a liability.** You will learn to probe an ISR with a GPIO
-  pin — about 30 nanoseconds — instead of a serial write that costs milliseconds.
+![HC-SR04P Ultrasonic Sensor](img/ultrasonic.png)
+- HC-SR04P ultrasonic distance sensor: 3.3V compatible sensor. Note that standard HC-SR04 requires 5V logic & will damage RP2040 3.3V GPIO inputs.
 
-Guidance drops again: instead of hints you get a list of **questions to ask the
-code**, and one sealed hint for use after thirty minutes of genuine effort.
+---
 
-> **Start here:** [`bughunt/`](bughunt/) · **Method:** [`../BUGHUNT.md`](../BUGHUNT.md)
+## environment setup
+
+install build toolchain & configure shell environment variables.
+
+macOS:
+```sh
+# install build tools, serial monitor & ARM GCC toolchain
+brew install cmake libusb
+brew install --cask gcc-arm-embedded
+# export environment variables permanently
+echo 'export PICO_SDK_PATH=$HOME/pico/pico-sdk' >> ~/.zshrc
+echo 'export PICO_BOARD=pico_w' >> ~/.zshrc
+# reload shell configuration
+source ~/.zshrc
+```
+
+windows (powershell):
+```powershell
+# set permanent user environment variables
+[Environment]::SetEnvironmentVariable("PICO_SDK_PATH", "C:\pico\pico-sdk", "User")
+[Environment]::SetEnvironmentVariable("PICO_BOARD", "pico_w", "User")
+```
+
+---
+
+## task 1: GPIO Hardware Interrupts
+
+configure event-triggered hardware interrupts using SDK callback mechanism.
+
+extra hardware:
+- 1x jumper wire
+
+polling vs interrupts trade-off:
+- polling continuously queries GPIO pin level in a tight loop. While simple, it wastes CPU cycles, increases power consumption & risks missing short asynchronous pulses if the polling interval is too long.
+- hardware interrupts alert the RP2040 core immediately upon an electrical transition. This allows the processor to enter low-power sleep states (WFI/WFE) & respond asynchronously with minimal latency.
+
+callback mechanism:
+- `gpio_set_irq_enabled_with_callback(2, GPIO_IRQ_EDGE_FALL, true, &gpio_callback)` passes a function pointer to the SDK interrupt dispatcher.
+- callback signature: `typedef void (*gpio_irq_callback_t)(uint gpio, uint32_t events);`. Any function matching this exact signature can be registered as an ISR.
+- the compiler cannot see asynchronous SDK hardware callback invocations in the control flow graph, requiring `volatile` qualification for variables shared between ISR & main thread.
+
+edge vs level triggering:
+- `GPIO_IRQ_EDGE_FALL` & `GPIO_IRQ_EDGE_RISE` fire once per electrical signal transition.
+- `GPIO_IRQ_LEVEL_LOW` & `GPIO_IRQ_LEVEL_HIGH` fire continuously as long as the pin condition persists. Switching to `GPIO_IRQ_LEVEL_LOW` without clearing the external condition causes the ISR to re-trigger endlessly, starving the main thread & hanging execution.
+
+build & flash (`hello_gpio_irq`):
+macOS:
+```sh
+# copy SDK import helper from ~/pico
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# copy hello_gpio_irq.c from pico examples
+cp ~/pico/pico-examples/gpio/hello_gpio_irq/hello_gpio_irq.c .
+# copy CMakeLists from bughunt & patch target to hello_gpio_irq
+cp bughunt/CMakeLists.txt CMakeLists.txt
+sed -i '' 's/bughunt3\.c/hello_gpio_irq.c/g; s/bughunt3/hello_gpio_irq/g' CMakeLists.txt
+# build target
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 hello_gpio_irq
+# flash to Pico W (bootsel mode)
+cp hello_gpio_irq.uf2 /Volumes/RPI-RP2
+# open serial monitor
+screen /dev/tty.usbmodem* 115200
+```
+
+windows (powershell):
+```powershell
+# copy SDK import helper & CMakeLists from bughunt
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+Copy-Item C:\pico\pico-examples\gpio\hello_gpio_irq\hello_gpio_irq.c .
+Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
+(Get-Content CMakeLists.txt) -replace 'bughunt3\.c', 'hello_gpio_irq.c' -replace 'bughunt3', 'hello_gpio_irq' | Set-Content CMakeLists.txt
+# build target
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target hello_gpio_irq
+# flash to Pico W
+Copy-Item hello_gpio_irq.uf2 -Destination D:\
+```
+
+---
+
+## task 2: IR Wheel Encoder
+
+interface HC020K optical slot sensor on GP02 to measure pulse duration & notch counts.
+
+extra hardware:
+- HC020K optical slot sensor module & slotted disc
+- 3x jumper wires
+
+![IR Wheel Encoder Module](img/irwheelencoder.PNG)
+![Encoder Waveform](img/encoder.png)
+
+working principle:
+- slotted wheel rotates between infrared LED & phototransistor detector, producing square-wave pulses as slots interrupt the optical beam.
+- distance measurement: count falling/rising edges inside ISR (each detected edge represents 1 slot).
+- speed measurement: measure period between successive slot starts (`previous_start_us` to `now`) using `time_us_32()` or `time_us_64()`. Rotational speed in RPM is calculated as `RPM = (60,000,000) / (period_us * SLOTS_PER_REV)`. Pulse width alone measures slot duty cycle rather than full rotational period.
+
+![IR Pico Wiring](img/irpico.png)
+
+wiring:
+- HC020K VCC -> 3V3 (pin 36)
+- HC020K GND -> GND (pin 38)
+- HC020K OUT -> GP02 (pin 4)
+
+---
+
+## task 3: Hardware Timers & Periodic Alarms
+
+configure RP2040 hardware timer peripherals for periodic & single-shot alarms.
+
+RP2040 timer features:
+- 64-bit microsecond counter accessible via `time_us_32()` (lower 32 bits) & `time_us_64()` (full 64 bits).
+- 4 independent hardware alarms (ALARM0 to ALARM3) generating interrupts on compare match.
+- timer modes: free-running (continuous counting), periodic (repeating interval interrupts) & one-shot (single delay callback).
+- input capture records timestamps upon GPIO transitions, while output compare triggers actions (GPIO toggling, PWM updates) at target timer counts.
+
+periodic alarm callbacks:
+- `add_repeating_timer_ms(-delay_ms, &timer_callback, NULL, &timer)`: negative delay specifies deterministic target-to-target execution intervals independent of callback execution duration.
+- positive delay schedules subsequent alarms relative to the return time of the callback.
+
+![Periodic Timer Timing](img/periodic.png)
+
+---
+
+## task 4: Ultrasonic Distance Sensor
+
+analyze HC-SR04P ranging sequence, naive blocking pitfalls & fix 3 planted defects in `ultrasonic.c`.
+
+extra hardware:
+- HC-SR04P 3.3V ultrasonic sensor module
+- 4x jumper wires
+
+![HC-SR04P Ultrasonic](img/ultrasonic.png)
+![Distance Formula](img/distance.png)
+![HC-SR04P Pico Wiring](img/hcsr04pico.png)
+
+sensor operation:
+1. trigger pulse: host microcontroller asserts 10 µs high pulse on TRIG pin.
+2. acoustic burst: sensor emits 8-cycle 40 kHz ultrasonic burst.
+3. echo pulse: ECHO pin asserts high for the duration of acoustic round-trip travel time.
+4. distance conversion: `distance_cm = (pulse_us * 0.0343 cm/us) / 2 = pulse_us / 58`.
+
+naive blocking loop vs non-blocking timer capture:
+- `ultrasonic.c` uses tight `while (gpio_get(echo_pin) == 0)` & `while (gpio_get(echo_pin) == 1)` loops. For an obstacle 2 m away, round-trip travel time is 4 m (~11.66 ms) of dead CPU spinning.
+- if an echo is lost or sensor is disconnected, the CPU hangs permanently in the blocking loop.
+- non-blocking timer capture uses edge interrupts to capture timestamps asynchronously, leaving the CPU available for other tasks.
+
+defects to fix in `ultrasonic.c` (3 total):
+1. line 42: missing semicolon `;` after variable declaration `absolute_time_t start_time, end_time`. Compiler reports syntax error on subsequent line 44.
+2. line 45: TRIG pin remains asserted high after `sleep_us(10)`. Pull TRIG low before waiting for ECHO pulse.
+3. line 70: missing factor of 2 in distance division. Sound velocity of 29.1 µs/cm applies to round-trip travel; return `pulse_us / 58` (or `pulse_us / (29 * 2)`) to compute 1-way distance.
+
+build & flash (`ultrasonic`):
+macOS:
+```sh
+# copy CMakeLists from bughunt & patch target to ultrasonic
+cp bughunt/CMakeLists.txt CMakeLists.txt
+sed -i '' 's/bughunt3\.c/ultrasonic.c/g; s/bughunt3/ultrasonic/g' CMakeLists.txt
+# build target
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 ultrasonic
+# flash to Pico W
+cp ultrasonic.uf2 /Volumes/RPI-RP2
+# monitor serial output
+screen /dev/tty.usbmodem* 115200
+```
+
+windows (powershell):
+```powershell
+# copy CMakeLists from bughunt & patch target to ultrasonic
+Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
+(Get-Content CMakeLists.txt) -replace 'bughunt3\.c', 'ultrasonic.c' -replace 'bughunt3', 'ultrasonic' | Set-Content CMakeLists.txt
+# build target
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target ultrasonic
+# flash to Pico W
+Copy-Item ultrasonic.uf2 -Destination D:\
+```
+
+---
+
+## task 5: GP21 Debounced Stopwatch
+
+implement debounced stopwatch application using hardware timer interrupts & GP21 push button.
+
+requirements:
+- press & hold GP21 button: starts stopwatch & continuously prints elapsed seconds to serial monitor.
+- release GP21 button: stops stopwatch & resets displayed elapsed time to 0.
+- GP21 button input must be debounced using timestamp comparison to filter contact bounce.
+- timekeeping must be driven by repeating hardware timer interrupt (`add_repeating_timer_ms`).
+
+wiring:
+- GP21 (pin 27) -> push button terminal 1; push button terminal 2 -> GND (internal pull-up enabled).
+
+---
+
+## task 6: Bug Hunt #3
+
+extra hardware:
+- HC020K optical slot sensor module & slotted disc
+- 3x jumper wires
+
+refer to bughunt readme for more.

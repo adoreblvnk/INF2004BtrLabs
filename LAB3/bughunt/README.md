@@ -1,239 +1,148 @@
-# BUG HUNT #3 — Works in Debug, hangs in Release
+# BUG HUNT #3: Interrupt State & Timing
 
-> **Guidance level: medium.** No walkthrough this time. Instead of hints, you get
-> a list of **questions to ask the code** — one per area, and it is your job to
-> turn each question into a hypothesis and an experiment. There is exactly one
-> hint, and it is sealed for use after thirty minutes of genuine effort.
-> Method: [`../../BUGHUNT.md`](../../BUGHUNT.md).
+investigate compiler optimization side effects, concurrency races, timer rollover & ISR latency in `bughunt3.c`.
 
-| | |
-|---|---|
-| **Algorithm** | Edge state machine, debounce, pulse-width timing |
-| **Defects planted** | **8** — 4 logical, 3 Heisenbugs, 1 undefined behaviour |
-| **Runs on** | Pico W + HC020K IR wheel encoder. No laptop shortcut this week. |
-| **Time** | 60–75 minutes |
-| **Optional practice notes** | `LOGBOOK.md` **and** the disassembly evidence from Task A |
+extra hardware:
+- HC020K optical slot sensor module & slotted disc
+- 3x jumper wires
 
 ---
 
-## The situation
+## debug vs release optimization analysis
 
-`bughunt3.c` is a wheel-encoder driver: count slots, measure how long each slot
-took, debounce the noisy optical edge, report the speed.
+compiler optimization flags alter code generation & memory access patterns for shared variables.
 
-It compiles. Read the compiler warnings anyway — **two of the eight defects are
-sitting in them**, and this is the last hunt where I will remind you.
-
----
-
-## This week the build configuration is part of the bug
-
-Everything you have debugged so far behaved the same way every time you ran it.
-That ends here.
-
-**Task A, before you change a single character of source:**
-
-First, **predict**. Read `bughunt3.c` and write down in your logbook what you
-expect each build to do — before you build either of them. You have been doing
-this since Lab 1's operator exercise, and this is the week it starts paying:
-the whole point of what follows is that one of your two predictions is wrong,
-and the gap between what you expected and what happens is the bug. A prediction
-written down afterwards is not a prediction.
-
-Now build the *identical, unmodified* source twice, into two separate
-directories:
-
-```bash
-mkdir build-debug && cd build-debug
-cmake -DPICO_BOARD=pico_w -DCMAKE_BUILD_TYPE=Debug -DPICO_DEOPTIMIZED_DEBUG=1 .. && make # -O0
+build comparison:
+macOS:
+```sh
+# build Debug (-O0)
+mkdir -p build-debug && cd build-debug
+cmake -DPICO_BOARD=pico_w -DCMAKE_BUILD_TYPE=Debug -DPICO_DEOPTIMIZED_DEBUG=1 ..
+make -j8 bughunt3
 cd ..
-mkdir build-release && cd build-release
-cmake -DPICO_BOARD=pico_w -DCMAKE_BUILD_TYPE=Release ..  && make    # -O3
+
+# build Release (-O3)
+mkdir -p build-release && cd build-release
+cmake -DPICO_BOARD=pico_w -DCMAKE_BUILD_TYPE=Release ..
+make -j8 bughunt3
+cd ..
 ```
 
-Flash each one, turn the wheel, and record in your logbook **exactly** what each
-build does. They are not the same. One of them never prints `done.` at all.
+windows (powershell):
+```powershell
+# build Debug (-O0)
+New-Item -ItemType Directory -Force -Path build-debug
+cd build-debug
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" -DCMAKE_BUILD_TYPE=Debug -DPICO_DEOPTIMIZED_DEBUG=1 ..
+cmake --build . --target bughunt3
+cd ..
 
-Then go and find out why, using the tools rather than guessing:
+# build Release (-O3)
+New-Item -ItemType Directory -Force -Path build-release
+cd build-release
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" -DCMAKE_BUILD_TYPE=Release ..
+cmake --build . --target bughunt3
+cd ..
+```
 
-```bash
+disassembly inspection:
+```sh
+# dump disassembly from compiled ELF binaries
+arm-none-eabi-objdump -d build-debug/bughunt3.elf > debug.asm
 arm-none-eabi-objdump -d build-release/bughunt3.elf > release.asm
-arm-none-eabi-objdump -d build-debug/bughunt3.elf   > debug.asm
 ```
 
-Find `main` in both files. Locate the loop that waits for `pulse_count`.
-
-In the **Debug** build the value is reloaded from memory on every pass:
-
+disassembly difference in main wait loop (`while (pulse_count < TARGET_SLOTS)`):
+- Debug (`-O0` / `-DPICO_DEOPTIMIZED_DEBUG=1`): `pulse_count` is reloaded from SRAM on every single loop iteration:
+```asm
+100003f8:  ldr   r3, [r3, #0]     ; read pulse_count from memory
+100003fc:  cmp   r3, #19          ; compare with TARGET_SLOTS - 1
+100003fe:  bls.n 100003f8         ; branch back and reload
 ```
-100003f8:  ldr   r3, [r3, #0]     <- read pulse_count
-100003fc:  cmp   r3, #19
-100003fe:  bls.n 100003f8         <- go back and read it again
+- Release (`-O3`): compiler performs loop-invariant code motion because `pulse_count` is not marked `volatile`. Having proven that single-threaded `main()` does not modify `pulse_count`, the compiler hoists the load before the loop & generates an infinite self-branch:
+```asm
+100003de:  ldr   r3, [r6, #0]     ; read pulse_count once before loop
+100003e0:  cmp   r3, #19          ; check initial count
+100003e2:  bhi.n 100003e6         ; exit if already completed
+100003e4:  b.n   100003e4         ; infinite branch to self (hangs forever)
 ```
-
-In the **Release** build the load happens exactly once, before the loop, and
-what is left behind is a single instruction that branches to its own address:
-
-```
-100003de:  ldr   r3, [r6, #0]     <- read pulse_count, once
-100003e0:  cmp   r3, #19
-100003e2:  bhi.n 100003e6         <- leave, if it is already big enough
-100003e4:  b.n   100003e4         <- this is the entire wait loop
-```
-
-Look at that last instruction until it bothers you. `100003e4` branches to
-`100003e4`. The compiler did not merely move the load outside the loop — having
-satisfied itself that `pulse_count` cannot change, it reasoned that if the
-condition is false when you arrive it will be false forever, and emitted an
-unconditional jump to itself. Your twenty-slot wait has been compiled into two
-bytes of machine code that can never, under any circumstances, terminate.
-
-Your addresses will differ. These loop shapes were checked with ARM GCC 13.2.1
-and SDK 1.5.1; inspect your generated code rather than assuming every toolchain
-must emit the same instructions. Copy `pico_sdk_import.cmake` as described in
-the local CMakeLists before configuring. Debug otherwise defaults to `-Og`.
-
-Paste both loops into your logbook. Keep this evidence with your practice notes.
-
-> The compiler did not break your code. It read your code, proved that nothing
-> inside that loop could possibly change the variable, and acted on the proof.
-> The proof was wrong, and it was wrong because you never told the compiler that
-> an interrupt exists. **Your job is to work out what keyword you owe it.**
+- mechanism: the compiler has no visibility into asynchronous hardware ISR invocations. Declaring shared state variables `volatile` enforces memory reloads on every access.
 
 ---
 
-## Questions to ask the code
+## defects to fix (8 total)
 
-Not hints. Questions. Turn each one into a written hypothesis before you test it.
-
-**On the shared state (2 defects live here)**
-
-- Which variables are written by `encoder_isr` and read by `main`? List them.
-  For each one, what stops `main` seeing a half-finished value?
-- The Cortex-M0+ is a 32-bit machine. How many instructions does it take to load
-  a `uint64_t`? What happens if the interrupt fires between them? Which variable
-  in this file is at risk, and what would the symptom look like?
-- What is the difference between what `volatile` guarantees and what *atomicity*
-  guarantees? Does `volatile` fix the previous question? (It does not. Why not,
-  and what does?)
-
-**On the debounce (1 defect)**
-
-- `time_us_32()` returns a 32-bit microsecond counter. How long until it wraps
-  back to zero? Work it out — it is not a round number of hours.
-- Consider `now > last + DEBOUNCE` versus `now - last > DEBOUNCE`. They look
-  equivalent. Take `last = 0xFFFFF000`, `DEBOUNCE = 50000`, and `now = 0xFFFFF100`
-  and evaluate both by hand in 32-bit unsigned arithmetic.
-- **Make it frequent before you fix it.** Do not wait 71 minutes. Test both
-  expressions in a host experiment using synthetic timestamps:
-  ```c
-  uint32_t last = 0xFFFFF000u, now = 0xFFFFF100u;
-  /* Only 256 us elapsed. Should this edge pass a 50000 us debounce? */
-  ```
-  Also test `now = 0x00001000u` after rollover. Setting only the saved timestamp
-  does not move the actual hardware timer near rollover.
-
-**On the state machine (1 defect)**
-
-- Trace `state`, `slot_start_us` and `slot_width_us` by hand for the first three
-  edges. Write the table out on paper.
-- What does the printed width tell you about how many edges the machine thinks it
-  needs to complete one slot? Compare that to how many it actually needs.
-
-**On the ISR itself (2 defects)**
-
-- Measure how long USB `printf` takes in this build. Compare that to the width of one
-  encoder slot at a realistic wheel speed. What happens to edges that arrive
-  during the `printf`?
-- Remove the `printf` from the ISR — do not fix anything else — and rerun. Does
-  a *different* symptom appear or get worse? Record what actually happens,
-  including no change. Instrumentation can hide timing defects, but it does
-  not guarantee another defect becomes visible when removed.
-- `DEBOUNCE_US` is 50000. What wheel speed makes a real slot shorter than that?
-  Above that speed, what does the driver report, and does it report it as an
-  error or as a plausible-looking wrong number? (The second is far worse.)
-
-**On the interrupt configuration (1 defect)**
-
-- The ISR is registered for one edge type. The slot-width calculation assumes
-  something about which edges it will see. Are those two assumptions compatible?
-- What would `slot_width_us` measure if you only ever see one edge per slot?
+1. lines 30-37 (`bughunt3.c`): shared state variables (`pulse_count`, `last_edge_us`, `slot_width_us`, `slot_period_us`, `state`) lack `volatile` qualification. Declare all variables written by ISR & read by `main()` as `volatile` to prevent compiler register caching in Release mode (`-O3`).
+2. line 106 (`bughunt3.c`): non-atomic 64-bit access on 32-bit ARM Cortex-M0+. Reading 64-bit variable `last_edge_us` requires 2 32-bit load instructions (`ldr`), risking word tearing if an ISR fires between the 2 loads. Protect multi-word reads in `main()` by disabling interrupts with `save_and_disable_interrupts()` & restoring with `restore_interrupts()`. Note that `volatile` prevents register caching but does not guarantee atomicity.
+3. line 52 (`bughunt3.c`): unsigned addition overflow in debounce comparison (`now > last_debounce_us + DEBOUNCE_US`). When `last_debounce_us` approaches `0xFFFFFFFF`, the addition wraps around to a small number, causing premature trigger or failure. Use unsigned subtraction (`(uint32_t)(now - last_debounce_us) > DEBOUNCE_US`).
+4. line 26 (`bughunt3.c`): excessive debounce duration (`#define DEBOUNCE_US 50000u` = 50 ms). At realistic wheel speeds (e.g. 60 RPM with 20 slots = 50 ms slot period, pulse width ~25 ms), valid slot pulses are shorter than 50 ms & get discarded. Reduce debounce threshold (e.g. 1000 µs / 1 ms).
+5. lines 57-70 (`bughunt3.c`): switch statement fallthrough. Missing `break;` statement in `case ENC_IDLE:` causes immediate fallthrough into `case ENC_SLOT:`, calculating zero slot width (`now - slot_start_us = 0`) & incrementing `pulse_count` on a single edge.
+6. lines 72-73 (`bughunt3.c`): blocking `printf` inside ISR. USB serial transmission takes milliseconds & delays interrupt completion, dropping subsequent high-speed edges & distorting timing (Heisenbug). Remove `printf` from ISR & defer output reporting to `main()`.
+7. lines 96-99 (`bughunt3.c`): interrupt edge configuration mismatch. Interrupt is registered only for falling edges (`GPIO_IRQ_EDGE_FALL`), but measuring slot pulse width requires capturing both slot entry (falling) & slot exit (rising) edges (`GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE`).
+8. line 112 (`bughunt3.c`): format string specifier mismatch. `finished_at` is a 64-bit unsigned integer (`uint64_t`), but formatted using `%u` (which expects a 32-bit integer), leading to undefined behavior & corrupted terminal output. Use `%llu` format specifier with an `(unsigned long long)` cast.
 
 ---
 
-## The instrument you should be reaching for
+## ISR instrumentation techniques
 
-Stop printing from the ISR. Do this instead:
+efficient techniques for observing ISR behavior without timing distortion.
+
+GPIO probe pin toggle:
+- toggling a GPIO pin takes ~2 CPU cycles (~30 ns at 125 MHz) compared to milliseconds for serial `printf`.
 
 ```c
 #define PROBE_PIN 15
-/* In main before enabling the IRQ:
- * gpio_init(PROBE_PIN); gpio_set_dir(PROBE_PIN, GPIO_OUT); */
+// in main before enabling IRQ:
+// gpio_init(PROBE_PIN); gpio_set_dir(PROBE_PIN, GPIO_OUT);
 
 void encoder_isr(uint gpio, uint32_t events) {
-    gpio_put(PROBE_PIN, 1);        /* ISR entry  - about 2 CPU cycles */
-    ...
-    gpio_put(PROBE_PIN, 0);        /* ISR exit                        */
+    gpio_put(PROBE_PIN, 1);    // probe entry (~30 ns)
+    // ISR logic
+    gpio_put(PROBE_PIN, 0);    // probe exit
 }
 ```
 
-Now put a scope or a second Pico on GP15. You can see *that* the ISR ran, *when*
-it ran, and *how long it took* — for a cost of roughly 30 nanoseconds instead of
-`printf`'s several milliseconds.
-
-When you need actual values rather than timing, log them into a ring buffer from
-the ISR and print them from `main`:
+ring buffer logging:
+- record event timestamps into a lightweight circular buffer inside ISR & drain/print from `main()` asynchronously:
 
 ```c
 static volatile uint32_t log_buf[64];
 static volatile uint8_t  log_head = 0;
-/* in the ISR:  log_buf[log_head++ & 63] = slot_width_us;   */
-/* in main:     drain and printf at your leisure            */
+
+// inside ISR:
+log_buf[log_head++ & 63] = slot_width_us;
+
+// in main():
+// drain and printf at background priority
 ```
 
-**Rule to take away: an ISR sets a flag and stores a number. It does not do work,
-and it certainly does not do I/O.**
-
 ---
 
-## Hint
+## build & flash to Pico W
 
-<details>
-<summary><b>Sealed — open only after 30 minutes of real effort on the questions above</b></summary>
+macOS:
+```sh
+# copy SDK import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# build target
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 bughunt3
+# flash to Pico W
+cp bughunt3.uf2 /Volumes/RPI-RP2
+# open serial monitor (Ctrl-A Ctrl-\ to exit)
+screen /dev/tty.usbmodem* 115200
+```
 
-The eight defects, by area, so you know where to keep looking:
-
-| Area | How many | Class |
-|---|---|---|
-| Shared state between ISR and `main` | 2 | 1 Heisenbug, 1 Heisenbug |
-| Debounce arithmetic | 1 | logical |
-| Debounce *duration* | 1 | logical |
-| The `switch` statement | 1 | logical |
-| `printf` in the ISR | 1 | Heisenbug |
-| Interrupt edge configuration | 1 | logical |
-| The final report in `main` | 1 | undefined behaviour |
-
-If you have found six and cannot place the last two: **two of these the compiler
-already told you about** (build with the warnings on and read them), and one is
-not visible at all until you ask what happens on the *second* revolution of the
-wheel at speed.
-</details>
-
----
-
-## Reflect on your attempt
-
-- `LOGBOOK.md`, at least **eight** defect rows plus your hypothesis trail.
-- The two disassembly extracts from Task A, with the differing instruction
-  highlighted.
-- In the reflection, answer this:
-
-> Did removing `printf` change another symptom? Explain,
-> in terms of *timing*, why adding an instrument to a system can hide the very
-> fault you were trying to observe — and what that implies about any bug you have
-> ever "fixed" by adding a print statement.
-
-## After your attempt
-
-This is ungraded practice; the logbook and reflection prompts are optional.
-Compare your reasoning with the separate [answer guide and corrected source](../../answers/bughunt3/README.md).
+windows (powershell):
+```powershell
+# copy SDK import helper
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+# configure and build
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target bughunt3
+# flash to Pico W
+Copy-Item bughunt3.uf2 -Destination D:\
+```

@@ -1,132 +1,82 @@
-# BUG HUNT #5 — It failed once, an hour in
+# BUG HUNT #5: FreeRTOS Sensor Pipeline
 
-> **Guidance level: minimal.** The specification, the defect count, and one
-> pointer. No hints, no worked examples, no questions list. You have done four
-> of these. Method: [`../../BUGHUNT.md`](../../BUGHUNT.md).
-
-| | |
-|---|---|
-| **Algorithm** | Ring buffer and moving average, under concurrency |
-| **Investigation areas** | **9** — 8 in `bughunt5.c`, 1 in `FreeRTOSConfig.h`; stack exhaustion is build-dependent |
-| **Runs on** | Pico W + FreeRTOS-Kernel (the one you set up earlier this lab) |
-| **Time** | 90 minutes |
-| **Optional practice notes** | `LOGBOOK.md` and the stack high-water table |
+fix 9 concurrency, synchronization & configuration defects across FreeRTOS sensor pipeline in `bughunt5.c` & `FreeRTOSConfig.h`.
 
 ---
 
-## The specification
+## kernel diagnostics & assertions
 
-Four tasks. A sensor task samples the RP2040's internal temperature sensor every
-**100 ms** and publishes each reading. A moving-average task maintains the mean
-of the **last ten** samples. A running-mean task maintains the mean **since
-boot**. A print task is the **only** task permitted to call `printf` — the same
-rule as the Lab 5 exercise.
+enable FreeRTOS diagnostic hooks to trap contract violations & stack overflows.
 
-Every published sample must reach **both** consumers. The two consumers must not
-influence each other's numbers. Nothing may be silently discarded.
-
-None of that currently holds.
-
----
-
-## The pointer
-
-You cannot read your way to nine concurrency defects, and you cannot `printf`
-your way there either — `printf` is one of the things perturbing the system.
-
-**The operating system already knows what is wrong. It has been told not to
-mention it.**
-
-Turn the kernel's own reporting on before you do anything else. Look up what
-each of these does, decide which ones you want, and switch them on:
-
+diagnostic configuration in `FreeRTOSConfig.h`:
+- `configASSERT(x)`: macro evaluates kernel preconditions & halts CPU upon contract violation. Prevents silent memory corruption from propagating:
 ```c
-configASSERT(x)
-configCHECK_FOR_STACK_OVERFLOW
-vApplicationStackOverflowHook()
-uxTaskGetStackHighWaterMark()
-configUSE_MALLOC_FAILED_HOOK
-vTaskList()
+#define configASSERT(x) if ((x) == 0) { taskDISABLE_INTERRUPTS(); for( ;; ); }
+```
+- `configCHECK_FOR_STACK_OVERFLOW`: set to `2` to enable stack boundary & canary verification on each context switch.
+- `vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)`: hook function called automatically by kernel when stack overflow occurs.
+- `uxTaskGetStackHighWaterMark(TaskHandle_t xTask)`: returns minimum remaining stack headroom in 32-bit words since task creation.
+- `configUSE_MALLOC_FAILED_HOOK`: traps heap allocation failure when dynamic memory is exhausted.
+
+debugging concurrency:
+- serial logging (`printf`) alters task execution timing, masks race conditions & distorts real-time behaviour. Kernel assertions & high-water mark introspection provide non-invasive diagnostics.
+
+---
+
+## defects to fix (9 total)
+
+1. line 88 (`FreeRTOSConfig.h`): unasserted kernel contracts. `configASSERT(x)` is defined as an empty macro, silently discarding kernel contract & precondition checks. Define assertion trap to disable interrupts & halt execution on failure (`configCHECK_FOR_STACK_OVERFLOW` & `configUSE_MALLOC_FAILED_HOOK` are also disabled).
+2. line 122 (`bughunt5.c`): `sizeof` on pointer vs buffer. `sizeof(&sample)` passes pointer size (4 bytes on 32-bit RP2040) instead of 16-bit integer size (2 bytes) to `xMessageBufferSend()`. The receiver buffer (2 bytes) cannot fit the 4-byte message, causing `xMessageBufferReceive()` to return 0. Pass `sizeof(sample)`.
+3. line 124 (`bughunt5.c`): raw tick delay instead of time macro & drift accumulation. `vTaskDelay(1)` delays for 1 raw tick rather than converting `SAMPLE_PERIOD_MS` via `pdMS_TO_TICKS()`. Replace with `xTaskDelayUntil()` to eliminate cumulative loop execution drift.
+4. lines 38, 134, 152 (`bughunt5.c`): multiple tasks reading 1 Message Buffer. Both `avg_task` & `mean_task` call `xMessageBufferReceive()` on 1 message buffer `mbuf`. FreeRTOS Message Buffers strictly require 1 reader (SPSC). Use dedicated message buffers or queues to fan out samples to multiple consumers.
+5. lines 63-70, 137, 155 (`bughunt5.c`): unprotected shared global ring buffer. Both `avg_task` & `mean_task` call `ring_push()` on shared global ring without synchronization, corrupting head/tail indices & distorting moving average window. Grant exclusive ring buffer ownership to `avg_task` & remove `ring_push()` from `mean_task`.
+6. lines 84-92, 140, 157 (`bughunt5.c`): non-reentrant `static` variables. `running_mean()` contains static accumulator & counter variables shared across callers, causing `avg_task` & `mean_task` to corrupt each other's calculations. Maintain independent accumulator & count state per task.
+7. line 100 (`bughunt5.c`): unhandled return value on queue send. `say()` ignores return value of `xQueueSend()`, causing silent telemetry loss when `print_q` is full. Check return status & handle full queue conditions or block with appropriate timeout.
+8. line 139 (`bughunt5.c`): incorrect moving average divisor during warm-up. `avg_task` divides `ring_sum()` by constant `RING_LEN` (10) before 10 samples have been collected, distorting early averages. Divide by populated element count `fill` until buffer is full.
+9. line 209 (`bughunt5.c`): stack exhaustion. `print_task` is allocated `configMINIMAL_STACK_SIZE` (256 words). Handling floating-point conversions in `printf` requires larger stack depth, leading to stack overflow. Increase stack allocation depth for `print_task`.
+
+---
+
+## build & flash to Pico W
+
+macOS:
+```sh
+# copy sdk import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# configure & build bughunt5
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w -DFREERTOS_KERNEL_PATH=$HOME/pico/FreeRTOS-Kernel ..
+make -j8 bughunt5
+# flash to pico (bootsel mode)
+cp bughunt5.uf2 /Volumes/RPI-RP2
+# open serial monitor (Ctrl-A Ctrl-\ to exit)
+screen /dev/tty.usbmodem* 115200
 ```
 
-These instruments can expose precondition failures and inadequate stack margins.
-Print a table of every
-task's stack high-water mark once a second and keep it on screen while you work —
-use that table to justify any change in stack allocation. Do not assume an
-overflow must occur on your SDK or formatting library.
-
-> `configASSERT` is not a debugging luxury. It is the kernel's contract with you:
-> kernel checks written with this macro disappear when it is empty. Enable it
-> during development. Whether to retain assertions in production is a separate
-> design decision; disabling them is not itself C undefined behaviour.
-
----
-
-## What you should expect
-
-The program may initially show no temperature readings: a message larger than
-the receiver's buffer stays queued, so repeated receives return zero. Compare
-the send size and receive capacity first. After that is repaired, later defects
-can produce plausible but wrong numbers. Their frequency depends on the build.
-
-Things worth being suspicious about, in no particular order and with no promise
-that each maps to exactly one defect:
-
-- A `#define` at the top of the file that nothing reads.
-- A synchronisation primitive that is created and never used again.
-- Two tasks calling `xMessageBufferReceive()` on the same buffer. Go and read
-  what the FreeRTOS documentation says about how many readers a message buffer
-  supports. It is a shorter answer than you expect, and it is not a suggestion.
-- A `static` variable inside a function that two different tasks call.
-- A function whose return value is being ignored, when the whole point of that
-  return value is to tell you it failed.
-- An average that divides by a constant when it should divide by however many
-  samples it actually has.
-- A `sizeof` applied to something that is not what you think it is.
+windows (powershell):
+```powershell
+# copy sdk import helper
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+# configure & build bughunt5
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" -DPICO_BOARD=pico_w -DFREERTOS_KERNEL_PATH="C:\FreeRTOS-Kernel-main" ..
+cmake --build . --target bughunt5
+# flash to pico
+Copy-Item bughunt5.uf2 -Destination D:\
+```
 
 ---
 
-## Two techniques for this hunt
+## expected output
 
-**Make it frequent.** An intermittent fault is not debuggable. Raise the sample
-rate, shrink `RING_LEN`, drop `PRINT_Q_LEN` to 2, run the sensor task at the same
-priority as the consumers. You are trying to turn "once an hour" into "twice a
-second". Once you can reproduce it on demand, the rest is ordinary work.
-
-**Change one scheduler knob at a time.** Priority, tick rate, stack size, queue
-length. Each one, on its own, then back. Record what moves and what does not. A
-symptom that moves when you change `configTICK_RATE_HZ` is a timing defect. A
-symptom that does not is a logic defect. That single distinction will halve your
-search space.
-
----
-
-## A warning about "fixes"
-
-Several of these defects can be made to *stop happening* without being fixed:
-
-- Give a task more stack without checking whether stack exhaustion caused the fault.
-- Slow the sensor task down, and the race gets rarer.
-- Make the queue longer, and the drops get less frequent.
-
-Each of those is rule 5 from the method — deleting a symptom. If your logbook
-contains a row where the conclusion is "increased the buffer and it went away",
-you have not finished; you have made the bug harder for the next person to find.
-Say *why* the resource was too small, or find the real defect.
-
----
-
-## Reflect on your attempt
-
-- `LOGBOOK.md`, at least **nine** defect rows plus your hypothesis trail.
-- A stack high-water-mark table for all four tasks, before and after your fixes.
-- In the reflection, answer this:
-
-> Pick the defect you would have been least likely to find by reading the source
-> code alone. What instrument found it, and what would have happened if this
-> firmware had shipped without anyone finding it?
-
-## After your attempt
-
-This is ungraded practice; the logbook and reflection prompts are optional.
-Compare your reasoning with the separate [answer guide and corrected source](../../answers/bughunt5/README.md).
+```
+BUG HUNT #5 - starting scheduler
+moving avg (last 10): 24.5 C
+running mean since boot: 24.5 C
+moving avg (last 10): 24.6 C
+running mean since boot: 24.5 C
+-- heap free: 124832 bytes --
+moving avg (last 10): 24.6 C
+running mean since boot: 24.5 C
+```

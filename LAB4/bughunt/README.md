@@ -1,126 +1,114 @@
-# BUG HUNT #4 — The maths is right on paper
+# BUG HUNT #4: Arithmetic & Signal Chain
 
-> **Guidance level: low.** You get the specification, the symptom, and a
-> technique you have not used yet. No hints, no questions list, no sealed
-> envelope. You already own the method — [`../../BUGHUNT.md`](../../BUGHUNT.md) —
-> and from here on it is yours to apply.
+fix 8 arithmetic & hardware defects across `algo.c` & `bughunt4.c`.
 
-| | |
-|---|---|
-| **Algorithm** | Fixed-point scaling and a first-order IIR filter |
-| **Defects planted** | **8** — 5 in `algo.c`, 3 in `bughunt4.c` |
-| **Runs on** | Laptop finds 5 in one second. The other 3 need the Pico. |
-| **Time** | 60–75 minutes |
-| **Optional practice notes** | `LOGBOOK.md` and one plotted step response |
+extra hardware:
+- 1x jumper wire
 
 ---
 
-## The situation
+## test on host first
 
-A voltage arrives at the ADC. It is scaled to millivolts, smoothed by a filter,
-and mapped onto a PWM duty cycle. Four small functions, none longer than four
-lines, every one of them arithmetically defensible if you read it quickly.
+validate algorithm logic locally on laptop before compiling for microcontroller.
 
-The specification is the comment block at the top of [`algo.h`](algo.h). It is
-correct.
-
-```bash
+```sh
+# compile host test harness
 gcc -Wall -Wextra -o bughunt4_host bughunt4_host.c algo.c
+# run tests
 ./bughunt4_host
 ```
 
-Read the compiler warnings. Then read the failures. Then read the **step
-response**, which is the part of the output that matters most.
+---
+
+## synthetic step input analysis
+
+debugging against physical sensors is inefficient due to noise, unrepeatable readings, & unknown ground-truth values. Feeding the algorithm a mathematically defined synthetic step input exposes arithmetic failures immediately.
+
+- rising step (0 -> 3000): filter must climb monotonically toward target and settle within quantisation tolerance ($\pm 15$ counts for $\alpha = 1/16$).
+- falling step (3000 -> 500): filter must decay smoothly toward 500. Unsigned subtraction underflow causes $(x - y)$ to wrap to $2^{32} - 2500 \approx 4.29 \times 10^9$, causing filter state to explode upward instead of decaying.
 
 ---
 
-## The technique this week: synthetic inputs
+## defects to fix (8 total)
 
-You have been debugging against real sensors. Real sensors are terrible for
-debugging: the input is noisy, unrepeatable, and you do not independently know
-what the right answer was.
+defects in `algo.c` (5 total):
+1. line 5 (`adc_to_mv`): 16-bit intermediate calculation overflow. Multiplying `raw * VREF_MV` ($4095 \times 3300 = 13,513,500$) overflows `uint16_t` (max 65535) before division occurs. Cast `raw` to `uint32_t` before multiplying.
+2. line 11 (`duty_from_adc`): fixed-point scaling integer division truncation. Dividing `raw / ADC_MAX` before multiplication truncates to 0 for all $\text{raw} < 4095$, forcing duty cycle to 0 across the entire input range except at full scale. Multiply `raw` by `wrap` in 32-bit precision before dividing by `ADC_MAX`.
+3. line 14 & 24 (`iir_reset` & `iir_step`): shared channel state across inputs. A single static accumulator `y` is shared across all channels, causing alternating ADC channel samples to corrupt each other's filter state. Replace scalar with an array indexed by channel number & reset all channel accumulators in `iir_reset`.
+4. line 24 (`iir_step`): filter unsigned subtraction underflow on falling step. When $x < y$ (falling step), unsigned subtraction underflows in 32-bit arithmetic, producing large positive values that blow up the filter. Cast operands to signed 32-bit integers (`int32_t`) and compute signed division.
+5. line 30 (`pwm_wrap_for_hz`): duty cycle & PWM wrap off-by-one arithmetic. RP2040 PWM counter runs from 0 to `wrap` inclusive, requiring $\text{wrap} + 1$ clock ticks per cycle. Subtract 1 from the calculated clock count to produce the exact target frequency.
 
-Instead, feed the algorithm a signal whose correct output you can work out on
-paper. A **step** is the best one:
+defects in `bughunt4.c` (3 total):
+6. lines 38-39 (`sample_cb`): ADC channel sequencing inversion. `adc_read()` is called before `adc_select_input(0)`, causing channel A to read data from whatever channel was previously selected (channel B from the prior cycle) before switching. Call `adc_select_input(0)` prior to `adc_read()`.
+7. line 50 & 52 (`sample_cb`): unsigned boundary comparison underflow. `delta` is declared as unsigned `uint32_t`, making `delta < 0` impossible (evaluates to false) and underflowing to large positive values when $\text{mv} > \text{TARGET\_MV}$. Declare `delta` as signed `int32_t` and handle both positive and negative errors.
+8. line 59-60 (`sample_cb`): printf conversion specifier mismatch. Floating-point variable `v` is passed to `%d` format specifier, printing corrupt integer garbage due to variadic argument type promotion & register layout mismatches. Use `%f` or `%.3f` format specifiers.
+
+---
+
+## build & flash to Pico W
+
+macOS:
+```sh
+# copy sdk import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# configure and build
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 bughunt4
+# flash to pico (bootsel mode)
+cp bughunt4.uf2 /Volumes/RPI-RP2
+# open serial monitor (Ctrl-A Ctrl-\ to exit)
+screen /dev/tty.usbmodem* 115200
+```
+
+windows (powershell):
+```powershell
+# copy sdk import helper
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+# configure and build
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target bughunt4
+# flash to pico
+Copy-Item bughunt4.uf2 -Destination D:\
+```
+
+---
+
+## expected output
 
 ```
-input:    0 0 0 0 3000 3000 3000 3000 3000 3000 ...
-```
+BUG HUNT #4 - signal chain
 
-A first-order filter with α = 1/16 fed a step must rise smoothly toward
-the target. With integer updates, it can settle up to 15 ADC counts away. You can
-sketch the curve before you run anything. Then feed it a step *downward* and
-demand the mirror image.
+adc_to_mv  (0..4095 -> 0..3300 mV)
+  adc_to_mv(0)                   got 0            expect 0            ok
+  adc_to_mv(1024)                got 825          expect 825          ok
+  adc_to_mv(2048)                got 1650         expect 1650         ok
+  adc_to_mv(4095)                got 3300         expect 3300         ok
 
-The harness already does this. Look at what comes out:
+duty_from_adc  (0..4095 -> 0..999)
+  duty_from_adc(0,    999)       got 0            expect 0            ok
+  duty_from_adc(1024, 999)       got 249          expect 249          ok
+  duty_from_adc(2048, 999)       got 499          expect 499          ok
+  duty_from_adc(4095, 999)       got 999          expect 999          ok
 
-```
+pwm_wrap_for_hz  (counter runs 0..wrap inclusive)
+  pwm_wrap_for_hz(20 Hz, 250.0)  got 24999        expect 24999        ok
+  pwm_wrap_for_hz(50 Hz, 100.0)  got 24999        expect 24999        ok
+
 step response - rising 0 -> 3000
-     187   1087   1699   2115   2396   2588   2718   2805   2865   2906
+     187   1087   1699   2115   2396   2588   2718   2805   2865   2906 
   (should climb smoothly and settle near 3000)
 
 step response - falling 3000 -> 500
-  268438233 1561219340 2438932590 3034842096 3439425414 ...
+    2778   2048   1554   1218    990    835    730    659    611    578 
   (should fall smoothly and settle near 500)
+
+channel independence
+  channel 0 fed a constant 1000, channel 1 fed a constant 2000
+  channel 0 settles near         got 985 target 1000 (+/-15) ok
+  channel 1 settles near         got 1985 target 2000 (+/-15) ok
+
+SIGNAL CHAIN MATCHES THE SPECIFICATION  (0 failures)
 ```
-
-Rising: textbook. Falling: the filter leaves the solar system.
-
-**A bug that only appears in one direction is telling you something very
-specific.** Work out what is different about the falling case, arithmetically,
-and you have the defect. Do the subtraction by hand in 32-bit unsigned, on
-paper, for `x = 500` and `y = 3000`.
-
-For your practice notes, plot both step responses (a spreadsheet is fine) before and
-after your fix. A picture of a filter that cannot come down is worth more than a
-paragraph describing one.
-
----
-
-## Then: the hardware
-
-When the host harness prints `SIGNAL CHAIN MATCHES THE SPECIFICATION`, wire GP0
-to GP26 and flash `bughunt4.c`.
-
-Three defects remain. What you should expect if you look carefully:
-
-- One is in the ADC sequence, and it makes every reading correct-looking but
-  attached to the wrong thing. It is invisible on a steady DC input and obvious
-  the moment the input moves. **Design an experiment that makes the input move
-  in a way you control.**
-- One is in a `printf`, and it prints a number that has no relationship
-  whatsoever to the value it claims to show. You have seen this defect class
-  before — it is also sitting in `LAB6/pid.c`, waiting for you.
-- One is a comparison that can never be true. The compiler warns about it. If
-  you did not see the warning, you are not building with `-Wall -Wextra`, and
-  that is itself worth a row in your logbook.
-
-And one thing the harness cannot check for you: **measure the actual frequency
-of the PWM on GP0.** Do not trust the `#define`. Use the lab's own ADC sampling
-exercise, or a second Pico, or a scope. The broken arithmetic gives about
-19.9992 Hz; once corrected it gives 20 Hz at the specified clock. Resolving
-this difference needs an accurate instrument; use the host test as the primary check.
-Work out from the RP2040 datasheet how many counter ticks a PWM period actually
-takes, and compare that with what `pwm_wrap_for_hz()` returns.
-
-> **The lesson underneath all of this:** none of these eight defects is a typo.
-> Every one is a piece of arithmetic that a competent person wrote while thinking
-> about the maths and not about the *types*. In C, the types are the maths.
-
----
-
-## Reflect on your attempt
-
-- `LOGBOOK.md`, at least **eight** defect rows plus your hypothesis trail.
-- A plot of the rising and falling step response, before and after.
-- In the reflection, answer this:
-
-> Three of these defects (the 16-bit intermediate, the truncating divide, and the
-> unsigned subtraction) share a single underlying cause. Name it in one sentence,
-> and describe a habit — not a fix, a *habit* — that would have prevented all
-> three.
-
-## After your attempt
-
-This is ungraded practice; the logbook and reflection prompts are optional.
-Compare your reasoning with the separate [answer guide and corrected source](../../answers/bughunt4/README.md).

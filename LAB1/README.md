@@ -1,374 +1,152 @@
-# LAB 1: Microcontroller and its Development Environment
+# LAB 1: Microcontroller and Development Environment
 
-**OBJECTIVES**
-- To setup and get you familiarised with the development environment for Raspberry Pi Pico W.
-- To get you familiarised with the Raspberry Pi Pico development board.
-
-**EQUIPMENT** 
-1.	A laptop that has the Pico C/C++ SDK installed
-2.	Raspberry Pi Pico or Raspberry Pi Pico W
-3.	Micro-USB Cable 
-
-> [NOTE]
-> Only students wearing fully covered shoes are allowed in the lab due to safety. 
-
-## **INTRODUCTION** 
-
-Programming an embedded system requires a deep-level understanding of the embedded processor architecture, the development environment tool, and the hardware interfaced with the embedded system. In this laboratory session, you will be introduced to the basic tools and how they can be used to aid your understanding of software development and, more importantly, to help you build your software. Programming for an embedded system differs significantly from programming on a desktop computer. The main differences are the limited resource constraints in terms of the program code and RA,M and the overall computation performance of an embedded system. For instance, our RP2040 microcontroller only provides 256KB of SRAM memory space. A 16MB Flash memory is added to the board and externally connected to the RP2040. Also, the various software components discussed in the lecture will be observed in  this session. At this point, you should  be familiar with  the fundamentals of C programming. You are encouraged to review it if you still need to. Do revise ALL the fundamentals of C programming covered in the following [site](https://www.cprogramming.com/tutorial/c-tutorial.html). This will prepare you for the subsequent lab sessions and make this subject more enjoyable. In addition, please brush up on the following:
-- “Numeral Systems” (e.g. binary, decimal, hexadecimal, etc)
-- “Ordering Consideration” (e.g. endianness, MSB, LSB, etc)
-
-## **RASPBERRY PI PICO** 
-
-In this lab session, we learned about the Raspberry Pi Pico development platform and the Pico C/C++ SDK, which is used throughout all lab sessions. We will also familiarise you with concepts like direct register access, polling, and serial communication. The following introduction provides a broad overview of the working environment; however, it is not necessary to understand all the details to complete this laboratory. 
-
-The Raspberry Pi Pico is an affordable microcontroller board developed by the Raspberry Pi Foundation, ideal for electronics projects. It features a dual-core ARM Cortex-M0+ processor, 26 GPIO pins, and supports multiple programming languages. However, it lacks built-in wireless connectivity. The Raspberry Pi Pico Wireless (Pico W) is an enhanced version of the Raspberry Pi Pico, featuring built-in Wi-Fi and Bluetooth. This makes it suitable for IoT and wireless communication projects while maintaining compatibility with Pico's programming languages and GPIO pins.
-
-The Raspberry Pi Pico family currently consists of four boards: Raspberry Pi Pico, Pico H, Pico W, and Pico WH.
-
-The following is the pinout for the Raspberry Pi Pico
-![Screenshot of a Raspberry Pi Pico](https://www.raspberrypi.com/documentation/microcontrollers/images/pico-pinout.svg)
-
-The following is the pinout for the Raspberry Pi Pico W
-![Screenshot of a Raspberry Pi Pico W](https://www.raspberrypi.com/documentation/microcontrollers/images/picow-pinout.svg)
-
-The most important documents of an embedded system are, among others, datasheets, user guides, technical reference manuals, application notes, errata and schematics. Therefore, every embedded system comes with many documentation files. All the necessary files for this lab and subsequent labs can be found on the Raspberry Foundation site and supplementary documents will be provided on the course xSITe website. It is essential to have access to all parts of the documentation to use the functionality of an embedded system to its fullest extent. Details of the hardware can be found [here](https://www.raspberrypi.com/documentation/microcontrollers/rp2040.html).
+environment setup & foundational C operations for Raspberry Pi Pico W.
 
 ---
 
-## **Step 1: Updating Dependencies**
+## hardware overview
 
-### **Raspberry Pi OS and Windows**
-No additional dependencies are required.
+Raspberry Pi Pico & Pico W board layouts.
 
-### **Linux**
-Most Linux distributions come with the necessary dependencies preinstalled. However, if required, install the following:
-- Python 3.9 or later
-- Git
-- Tar
-- A native C and C++ compiler (GCC supported)
+![Raspberry Pi Pico Pinout](img/pico%20pinout.png)
+- Raspberry Pi Pico: RP2040 microcontroller, dual-core ARM Cortex-M0+, 264 KB SRAM, 26 multifunction GPIO pins (3.3V logic).
 
-Run the following command to install missing dependencies:
-```bash
-sudo apt install python3 git tar build-essential
-```
-
-### **macOS**
-*The steps described for macOS are extracted from this [guide](https://www.eldelto.net/articles/raspberry-pi-pico-setup-for-macos).*
-
-To install the required dependencies, run:
-```bash
-xcode-select --install
-```
-This installs:
-- Git
-- Tar
-- A native C and C++ compiler (GCC and Clang supported)
+![Raspberry Pi Pico W Pinout](https://www.raspberrypi.com/documentation/microcontrollers/images/picow-pinout.svg)
+- Raspberry Pi Pico W: includes CYW43439 wireless chip. Note that on-board LED is connected directly to the wireless chip via SPI rather than RP2040 SIO GPIO.
 
 ---
 
-## **Step 2: Setting Up the Pico SDK**
-Ensure your system has the following tools installed:
-- **CMake**: For generating build files.
-- **GNU Make**: For compiling.
-- **ARM GCC Toolchain**: For cross-compilation.
+## environment setup
 
-Install the Pico SDK and necessary tools:
-```bash
-sudo apt install cmake
-sudo apt install make
-sudo apt install gcc-arm-none-eabi
+install build toolchain & configure shell environment variables.
+
+macOS:
+```sh
+# install build tools, serial monitor & ARM GCC toolchain
+brew install cmake libusb
+brew install --cask gcc-arm-embedded
+# create pico directory & clone Pico SDK with submodules
+mkdir -p ~/pico
+git clone https://github.com/raspberrypi/pico-sdk.git ~/pico/pico-sdk
+git -C ~/pico/pico-sdk submodule update --init
+# clone pico examples
+git clone https://github.com/raspberrypi/pico-examples.git ~/pico/pico-examples
+# export environment variables permanently (prevents terminal amnesia)
+echo 'export PICO_SDK_PATH=$HOME/pico/pico-sdk' >> ~/.zshrc
+echo 'export PICO_BOARD=pico_w' >> ~/.zshrc
+# reload shell configuration
+source ~/.zshrc
 ```
 
-Clone and initialize the Pico SDK & Pico Examples:
-```bash
-git clone https://github.com/raspberrypi/pico-sdk.git
-cd pico-sdk
-git submodule update --init
-cd ..
-git clone -b master https://github.com/raspberrypi/pico-examples.git
+windows (powershell):
+```powershell
+# clone Pico SDK & submodules
+New-Item -ItemType Directory -Force -Path C:\pico
+git clone https://github.com/raspberrypi/pico-sdk.git C:\pico\pico-sdk
+git -C C:\pico\pico-sdk submodule update --init
+# clone pico examples
+git clone https://github.com/raspberrypi/pico-examples.git C:\pico\pico-examples
+# set permanent user environment variables
+[Environment]::SetEnvironmentVariable("PICO_SDK_PATH", "C:\pico\pico-sdk", "User")
+[Environment]::SetEnvironmentVariable("PICO_BOARD", "pico_w", "User")
 ```
 
 ---
 
-## **Step 3: Compiling and Running Your Files**
-Once the Pico SDK is installed, follow these steps to compile and flash your files to the Pico W.
+## build pipeline overview
 
-1. **Open a terminal.**
-2. **Set the environment path for the Pico SDK**
-   ```bash
-   export PICO_SDK_PATH=/home/username/pico_path/pico-sdk
-   ```
-3. **Navigate to the directory** where your project files are located.
-4. **Create a build directory:**
-   ```bash
-   mkdir build
-   cd build
-   ```
-   
-### 🛑 Common Pitfall: "Terminal Amnesia"
+compilation & flashing workflow.
 
-Think of a terminal window like a short-term sticky note. When you run the `export PICO_SDK_PATH=...` command, you are only teaching *that specific window* where the Pico SDK lives. 
+![Build Overview](img/overview.png)
+- C source files are processed by CMake and compiled using ARM GCC (`arm-none-eabi-gcc`) into ELF/UF2 binaries, which are copied onto the Pico mass storage volume in BOOTSEL mode.
 
-If you close that window, open a new tab, or switch to the built-in terminal inside VS Code, the new window has complete amnesia. It has no idea where the SDK is, and your `cmake` command will instantly fail. You must run the `export` command again for every new window you open (unless you save it permanently to your shell profile).
+---
 
-**How to verify your terminal remembers:** Before you run `cmake`, you can test if your current window knows the path by asking it to print the variable. Run this command:
+## task 1: Predict, then run (`basic.c`)
 
-```bash
-echo $PICO_SDK_PATH
+verify evaluation rules for arithmetic, logical, relational, increment/decrement & bitwise operators in C before running code.
+
+key operator predictions:
+- `b / a` (20 / 10 = 2) & `b % a` (20 % 10 = 0): integer division truncates fractions toward zero.
+- `c++` vs `++c`: `c` begins at 5. `c++` evaluates to 5 (post-increment, `c` becomes 6). `++c` evaluates to 7 (pre-increment, `c` becomes 7). `c--` evaluates to 7 (`c` becomes 6). `--c` evaluates to 5 (`c` becomes 5).
+- `~p` where `p = 5`: bitwise NOT on signed 32-bit integer inverts all bits, producing two's complement value `-6`.
+- relational expressions (`a > b`, `a == b`): evaluate to integer `0` (false) or `1` (true).
+
+build & run on host:
+```sh
+# compile directly with host gcc
+gcc -Wall -Wextra -o basic basic.c
+# execute & compare predictions against terminal output
+./basic
 ```
 
-5. **Generate build files and compile:**
-   ```bash
-   cmake -DPICO_BOARD=pico_w ..
-   make -j8
-   ```
-6. **Flash your compiled file to the Pico W:**
-   ```bash
-   cp build/your_file.uf2 /media/your_username/RPI-RP2
-   ```
-   Alternatively, you can **drag and drop** the UF2 file onto the Pico W drive in your file manager.
+build & flash to Pico W:
+```sh
+# copy sdk import helper from ~/pico
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# copy CMakeLists from bughunt & patch target name
+cp bughunt/CMakeLists.txt CMakeLists.txt
+sed -i '' 's/bughunt1/basic/g' CMakeLists.txt
+# build target
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 basic
+# flash via bootsel mode
+cp basic.uf2 /Volumes/RPI-RP2
+# open serial monitor
+screen /dev/tty.usbmodem* 115200
+```
 
 ---
 
-## **Optional: Using Visual Studio Code Extension**
-You can also use the **Visual Studio Code Pico W extension** to build and flash your files.
+## task 2: Blinky warm-up (`blinky.c`)
 
-### **Steps:**
-1. **Open Visual Studio Code.**
-2. Ensure the [**Pico W extension**](/img/raspberry_pico_ext.png) is installed.
-3. Click on the [**Pico W icon**](/img/ext_icon.png) in the sidebar.
-4. Click on [**"New Project From Example"**](/img/project_example.png) and select blinky as your first project follow the setup instructions.
-5. Click on the **"Build"** button to compile your files.
-6. Click on the **"Flash"** button to upload your files to the Pico W.
+blink external LED on GP15 across 11 doubling intervals (1 ms to 1024 ms), resetting back to 1 ms upon reaching 2048 ms.
 
-> **Note:** The initial project build may take some time, but subsequent builds will be much faster.
+wiring:
+- GP15 -> 330 Ω resistor -> LED anode; LED cathode -> GND
+- on Pico W, the on-board LED is connected via SPI to CYW43 WiFi SoC, so driving GP15 provides direct RP2040 GPIO output.
 
----
+defects to fix (3 total):
+1. line 29: `sleep_ms(a<<1)` computes shift without updating variable `a`. Update `a` so that the value doubles on each iteration.
+2. line 33: off-delay is doubled instead of matching the on-delay. Ensure both on and off durations use identical delay periods.
+3. line 37: `if(a=2048) a==0;` mixes up assignment `=` and comparison `==` operators. Check whether `a` reaches 2048 and reset it back to 1.
 
-## **Alternative: Using Visual Studio Code**
+build & flash:
+```sh
+# copy sdk import helper
+cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
+# copy CMakeLists from bughunt & patch target to blinky
+cp bughunt/CMakeLists.txt CMakeLists.txt
+sed -i '' 's/bughunt1/blinky/g' CMakeLists.txt
+# configure and build
+rm -rf build && mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 blinky
+# flash to pico (bootsel mode)
+cp blinky.uf2 /Volumes/RPI-RP2
+```
 
-There are various [methods](https://datasheets.raspberrypi.com/pico/getting-started-with-pico.pdf) (see chapters 2 and 9) to setup the development environment for the pico in C using the Pico SDK, depending on what OS you are using on your PC/laptop. 
+windows (powershell):
+```powershell
+# copy import helper & CMakeLists
+Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
+Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
+(Get-Content CMakeLists.txt) -replace 'bughunt1', 'blinky' | Set-Content CMakeLists.txt
+# build
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target blinky
+# flash
+Copy-Item blinky.uf2 -Destination D:\
+```
 
-**Windows OS**
-
-1. Download and install [this](https://github.com/raspberrypi/pico-setup-windows/releases/latest/download/pico-setup-windows-x64-standalone.exe) tool.
-
-2. Launch Pico Visual Studio Code: use the Windows search and type **"pico"** to locate the application.
-
-3. Open pico_examples folder: Go to **"File->Open Folder"**, locate the folder. ie. "C:/Users/<YourName>/Documents/Pico-v1.5.0/pico_examples"
-
-Visual Studio Code will ask if you want to configure the pico-examples project when it is first opened; click *Yes* on that prompt to proceed. You will then be prompted to select a kit -- select the *Pico ARM GCC - Pico SDK Toolchain with GCC arm-none-eabi* entry. 
-
-> [NOTE]
-> Please restart your PC/laptop (multiple times) after installing the SDK. This resolved many first-time compilation error issues that were brought to my attention. :)
-
-**macOS**
-
-1. Download "Visual Studio Code.app" from [here](https://code.visualstudio.com/download). *Drag "Visual Studio Code.app" into the Applications folder.*
-
-2. Install all required dependencies:
-   ```bash
-   brew install gcc-arm-embedded libusb make cmake git
-   ```
-   
-3. Create a new folder called **pico** to contain all related tools:
-   ```bash
-   mkdir pico
-   ```
-
-4. Checkout the **pico-sdk** from Github:
-   ```bash
-   cd pico
-   git clone https://github.com/raspberrypi/pico-sdk.git
-   ``` 
-
-5. Fetch all referenced submodules:
-   ```bash
-   cd pico-sdk
-   git submodule update --init
-   ```  
-
-6. Checkout the **pico-examples** from Github:
-   ```bash
-   cd ..
-   git clone https://github.com/raspberrypi/pico-examples.git
-   ```
-
-7. Delete the **build** folder inside pico-examples (skip this step if this is a fresh setup).:
-   ```bash
-   cd pico_examples
-   rm -rf build
-   ```
-
-8. Set two environment variables that are required by the build process
-   ```bash
-   export PICO_SDK_PATH=/users/<YourName>/pico/pico-sdk
-   export PICO_BOARD=pico_w
-   ```
-
-9. Launch Pico Visual Studio Code from terminal (to inherit terminal environment variables):
-   ```bash
-   /Applications/Visual Studio Code.app/Contents/Resources/app/bin/code
-   ```
-
-10. Ensures environment variables are automatically applied in new terminal sessions.
-   ```bash
-   echo 'PICO_SDK_PATH=/users/<YourName>/pico/pico-sdk' >> ~/.zshrc
-   echo 'PICO_BOARD=pico_w' >> ~/.zshrc
-   ```
-
-11. Open pico_examples folder: Go to **"File->Open Folder"**, locate the folder. ie. "/users/username/pico/pico-examples".
-You will then be prompted to select a kit -- select the *arm-none-eabi-gcc* entry.
-
-## **BUILDING AN EXAMPLE**
-
-Ensure you select the right application when starting Visual Studio Code, as two variations might be installed on your laptop. The icon should look as follows:
-
-![Screenshot of Pico - Visual Studio Code](/LAB1/img/pico_vsc.png)
-
-Once "Pico - Visual Studio Code" (VSCode) is started, click the [CMake](/img/cmake.png) icon and select the sample code you want to work on. In this example, we will use the [Hello World](https://github.com/raspberrypi/pico-examples/tree/master/hello_world/usb) example. The following [video](https://www.youtube.com/watch?v=NPwoflT_bB0) demonstrates how you get started with VSCode. Note that we are using the hello_usb version of the code. This allows the USB connection between the pico and the PC/laptop to become a virtual UART connection, which can be used together with printf (for debugging purposes).
-
-Now, try to compile and run the [blink](https://github.com/raspberrypi/pico-examples/tree/master/pico_w/wifi/blink) example.
-
-If you are using the Pico W boards, you must make a small amendment to the CMakeLists.txt file. Include "set(PICO_BOARD pico_w)" to line #11. The following [video](https://www.youtube.com/watch?v=sTNtLkoHN58) demonstrates how to make the changes and build a [blink](https://github.com/raspberrypi/pico-examples/tree/master/pico_w/wifi/blink) example for the Pico W. 
-
-![Screenshot of Pico - Visual Studio Code](/LAB1/img/picow_support.png)
-
-> [NOTE]
-> The normal blink example will only work on a standard Pico (without wireless). This is because the Pico W LED is connected to the WiFi SoC and not directly to the RP2040.
-
-## **DOWNLOADING FIRMWARE INTO THE PICO**
-
-Depending on your preferences and requirements, several methods are available to upload firmware to a Raspberry Pi Pico microcontroller board. Here is a brief overview of two of the most common methods:
-
-<img width="835" height="625" alt="image" src="https://github.com/user-attachments/assets/3d1be0db-e686-44a9-ab1c-2460425ecf4b" />
-
-
-1. **Drag and Drop (Mass Storage Device):**
-   - The Raspberry Pi Pico has a built-in feature that makes it appear as a mass storage device when connected to a computer via USB.
-   - To get the board in bootloader mode ready for the firmware update, hold down the BOOTSEL button while plugging the board into USB. You can only release the button once you connect the pico to the PC/laptop properly.
-   - Drag and drop a UF2 file onto Pico's virtual drive to upload firmware using this method.
-   - This is a beginner-friendly method and doesn't require any additional software.
-
-3. **Using JTAG/SWD (For Advanced Users):**
-   - Advanced users and developers may opt for JTAG/SWD debugging and programming tools to upload firmware.
-   - This method offers greater control and debugging capabilities but requires additional hardware and expertise.
-   - You may configure another pico as a SWD Debugger called PicoProbe. See [Appendix A](https://datasheets.raspberrypi.com/pico/getting-started-with-pico.pdf).
-   - Here is a video of someone configuring and using the [PicoProbe](https://www.youtube.com/watch?v=0i2gLeBal9Y).
-
-**In this lab, we will use method #1 (Drag and Drop).**
-
-## **Optional:**
-You can also use a VM which has everything preinstalled and configured. It is available in the repo with the installer and also the VM image. Please ensure that you have 40 GB of free space on your hard drive. Vmware fusion is for mac users and vmware workstation for windows users, download the correct version for your system. 
-
-Once u have installed the VMware software, place the image in the virtual machines folder and click on scan to get it to recognise it. Then, click on the image and select 'Import'. Once the VM is imported, click on the VM and click on Power On. The password is password.
-
-## **Troubleshotting:**
-If you encounter a 'build not found' error, ensure that the Pico SDK is correctly cloned and initialised. If the issue persists, check the path in the CMakeLists.txt file.
-
-
-## **THE BIG PICTURE**
-The figure below illustrates the entire procedure.
-![Built Overview](/LAB1/img/overview.png)
-
-
-## **TASK — Predict, then run**
-
-The [basic code](basic.c) example exercises every family of operator in C:
-arithmetic, relational, logical, increment/decrement, assignment, the ternary
-conditional, and bitwise. Running it and reading the output teaches you very
-little, because everything the program prints will look reasonable after the
-fact. So do it the other way round.
-
-**Before you build anything**, open `basic.c` and write down — on paper, or in a
-text file — the *exact* line that each `printf` will produce. Work through the
-whole program, but be especially careful with these four:
-
-| Block | What to work out |
-|---|---|
-| `b / a` and `b % a` | Both operands are `int`. What type is the result, and what happens to any fractional part? |
-| `c++` vs `++c` | Four statements, one variable. Track the value of `c` **after** each line, not just what is printed. |
-| `~p` where `p = 5` | `p` is a *signed* `int`. Give the decimal value that will be printed, not the bit pattern. |
-| relational and logical | `a > b` prints as `%d`. What integer does a comparison actually evaluate to in C? |
-
-**Then build it, run it, and diff your prediction against the output.** Every
-line you got right, you understood. Every line you got wrong is something you
-believed about C that is not true — and finding those now, on a program that
-cannot hurt you, is enormously cheaper than finding them in Week 5 inside an
-interrupt handler.
-
-Bring your mismatches to the lab session. They are the point of the exercise;
-a perfect prediction with nothing to discuss is the least interesting outcome.
-
-> This is the first instance of a habit you will use all semester. It is Rule 3
-> of [BUGHUNT.md](../BUGHUNT.md): *predict, then run.* When the output matches
-> your prediction, you understood the system. When it does not, **that gap is
-> the bug** — and you found it by being surprised, not by scrolling.
-
-## **EXERCISE — Warm-up for the Bug Hunt**
-
-This is a two-minute version of what you will be doing for the rest of the
-semester. Do it before you open Bug Hunt #1.
-
-**Wiring.** `GP15` → 330 Ω resistor → LED anode; LED cathode → `GND`.
-We drive a real pin rather than the on-board LED because on the **Pico W the
-on-board LED is wired to the WiFi chip, not to the RP2040** — `PICO_DEFAULT_LED_PIN`
-does not exist on this board. A real pin is also one you can put a scope on,
-which will matter from Lab 2 onward.
-
-**Specification.** The [blinky code](blinky.c) blinks the LED at a rate set by
-the variable `a`:
-
-- `a` starts at **1 ms** and **doubles** on every iteration of the loop;
-- when `a` reaches 2048, it **resets to 1**;
-- within a single iteration the LED must be on and off for the **same** delay.
-
-So `a` should take the values **1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024**
-and then return to 1 — eleven delays per cycle, repeating forever. That
-sequence is what "working" means; if your fixed program prints anything else,
-it is not fixed yet.
-
-**There are three defects**, and the code compiles with all three in place. Two
-of them are in a single line. Read the specification above against the source
-and account for all three before you change anything — then fix them one at a
-time, checking the printed sequence after each change.
-
-> [!IMPORTANT]
-> Add a `printf` so you can watch `a` — you cannot verify the sequence above by
-> looking at an LED. `stdio_init_all()` is already called for you, but you will
-> still need to modify the CMake file so that `printf` reaches your terminal.
-> Refer to the CMake file in the Hello_World example for insights into this.
-
-**A hint on method, once, and never again:** the compiler will warn about two of
-these three defects if you ask it to. `-Wall -Wextra` is not optional in this
-module, and it is the first row of the instrument table in
-[BUGHUNT.md](../BUGHUNT.md) for a reason.
+verify:
+- LED delay sequence doubles steadily: 1 ms, 2 ms, 4 ms, 8 ms, 16 ms, 32 ms, 64 ms, 128 ms, 256 ms, 512 ms, 1024 ms, then resets to 1 ms.
 
 ---
 
-## **BUG HUNT #1 — Bits that lie about themselves**
+## task 3: Bug Hunt #1
 
-Attached to this lab is the first of six **Bug Hunts**: a small piece of real
-firmware with defects already planted in it, and your job is to find them.
-
-The `blinky.c` exercise above was the warm-up — three defects in a dozen lines,
-with the specification handed to you. **This is the same exercise with the
-training wheels loosened**: more code, more defects, and a specification you
-have to hold in your head while you read. Do `blinky.c` first.
-
-You have been taught to *write* code. Almost nobody is taught to *debug* it — and
-in embedded work there is no operating system to catch your mistakes, no
-`print` you can trust inside an interrupt, and a fault that appears once an hour
-is still a fault that will ship.
-
-This week's algorithm is **bit counting and bit manipulation** — the code that
-sits at the bottom of every GPIO driver. **Six defects** are planted: three that
-stop it compiling, two that let it compile and give the wrong answer, and one
-that is undefined behaviour.
-
-Hunt #1 is heavily guided. It walks you through the first defect from start to
-finish and gives you a hint for every remaining one. The guidance drops at every
-rung; by Hunt #6 you get a specification, a number, and nothing else.
-
-> **Start here:** [`bughunt/`](bughunt/) · **Method:** [`../BUGHUNT.md`](../BUGHUNT.md)
+refer to bughunt readme for more.
