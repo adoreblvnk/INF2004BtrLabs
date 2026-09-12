@@ -2,9 +2,6 @@
 
 fix 8 arithmetic & hardware defects across `algo.c` & `bughunt4.c`.
 
-extra hardware:
-- 1x jumper wire
-
 ---
 
 ## test on host first

@@ -311,10 +311,13 @@ gcc -Wall -Wextra -o pid pid.c -lm
 
 ---
 
-## task 6: Bug Hunt #6 (pair / 2 boards)
+## task 6: Bug Hunt #6
 
-extra hardware:
-- Pico (flashed with `picoprobe.uf2`)
-- 3x jumper wires
+```sh
+cd bughunt
+gcc -Wall -Wextra -O0 -o bughunt6_host bughunt6_host.c bughunt6.c && ./bughunt6_host
+gcc -Wall -Wextra -O2 -o bughunt6_host bughunt6_host.c bughunt6.c && ./bughunt6_host
+gcc -Wall -Wextra -O3 -o bughunt6_host bughunt6_host.c bughunt6.c && ./bughunt6_host
+```
 
 refer to [bughunt readme](bughunt/README.md) for more.

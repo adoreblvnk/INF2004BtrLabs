@@ -236,11 +236,13 @@ hardware failure mechanism:
 
 ---
 
-## task 4: Bug Hunt #2 (pair)
+## task 4: Bug Hunt #2
 
-extra hardware:
-- Pico
-- 3x jumper wires
+```sh
+cd bughunt
+gcc -Wall -Wextra -o bughunt2_host bughunt2_host.c frame.c && ./bughunt2_host
+gcc -Wall -Wextra -fsanitize=address,undefined -g -o bughunt2_check bughunt2_host.c frame.c && ./bughunt2_check
+```
 
 refer to bughunt readme for more.
 
@@ -250,9 +252,10 @@ refer to bughunt readme for more.
 
 zero-allocation ASCII command parser (`PING`, `GET TEMP`, `SET LED <index> <state>`) without `malloc` or `strtok()`. Mutates input buffers in-place by writing null terminators over whitespace separators.
 
-extra hardware:
-- Pico
-- 3x jumper wires
+```sh
+cd cmdparse
+gcc -Wall -Wextra -o cmdparse_host cmdparse_host.c cmdparse.c && ./cmdparse_host
+```
 
 refer to cmdparse readme for more.
 

@@ -166,7 +166,9 @@ key insight:
 
 ## task 4: Bug Hunt #4
 
-extra hardware:
-- 1x jumper wire
+```sh
+cd bughunt
+gcc -Wall -Wextra -o bughunt4_host bughunt4_host.c algo.c && ./bughunt4_host
+```
 
 refer to bughunt readme for more.

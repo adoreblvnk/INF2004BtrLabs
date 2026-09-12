@@ -16,7 +16,7 @@ parsers running on bare-metal microcontrollers operate under strict memory & ree
 
 ## test on host first
 
-validate parser logic locally on laptop with GCC before deploying to microcontroller hardware.
+validate parser logic locally on laptop with unit tests:
 
 ```sh
 # compile host test harness
@@ -37,13 +37,10 @@ gcc -Wall -Wextra -o cmdparse_host cmdparse_host.c cmdparse.c
 
 ---
 
-## build & run on Pico W
+## optional: deploy & run on Pico W
 
+once all host tests pass, you can optionally flash the demo firmware to a Pico W.
 connect GP8 (TX1) & GP9 (RX1) to serial sender, with external LEDs wired to GP2, GP3, GP4 & GP5.
-
-extra hardware:
-- Pico
-- 3x jumper wires
 
 macOS:
 ```sh

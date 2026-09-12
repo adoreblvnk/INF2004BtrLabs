@@ -1,16 +1,12 @@
-# BUG HUNT #6: Telemetry Layer & Low-Level Debugging (pair / 2 boards)
+# BUG HUNT #6: Telemetry Layer & Low-Level Debugging
 
-fix 12 defects in CRC-8 table generation, LFSR test pattern generation, packet frame parser & sensor delay logic across `bughunt6.c` (hardware debugging exercises require 2 boards / pair).
-
-extra hardware:
-- Pico (flashed with `picoprobe.uf2`)
-- 3x jumper wires
+fix 12 defects in CRC-8 table generation, LFSR test pattern generation, packet frame parser & sensor delay logic across `bughunt6.c`.
 
 ---
 
 ## test on host first
 
-validate algorithmic logic locally before building for target microcontroller.
+validate algorithmic logic locally across optimization levels:
 
 ```sh
 # compile host test harness across optimization levels

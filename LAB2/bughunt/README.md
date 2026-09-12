@@ -1,16 +1,12 @@
-# BUG HUNT #2: Framing & Serialisation (pair)
+# BUG HUNT #2: Framing & Serialisation
 
-fix 7 defects in UART packet encoding, checksum verification & stream synchronisation across frame codec & Pico link driver (requires 2 boards / pair).
-
-extra hardware:
-- Pico
-- 3x jumper wires
+fix 7 defects in UART packet encoding, checksum verification & stream synchronisation across frame codec & Pico link driver.
 
 ---
 
 ## test on host first
 
-validate codec logic locally on laptop with unit tests & sanitizers before flashing hardware.
+validate codec logic locally on laptop with unit tests & sanitizers:
 
 ```sh
 # compile & run host test harness
