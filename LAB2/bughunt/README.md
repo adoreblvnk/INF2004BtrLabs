@@ -57,7 +57,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target bughunt2
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 Copy-Item bughunt2.uf2 -Destination D:\
 ```
 

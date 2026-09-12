@@ -128,7 +128,7 @@ cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 bughunt3
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 cp bughunt3.uf2 /Volumes/RPI-RP2
 # open serial monitor (Ctrl-A Ctrl-\ to exit)
 screen /dev/tty.usbmodem* 115200
@@ -143,6 +143,6 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target bughunt3
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 Copy-Item bughunt3.uf2 -Destination D:\
 ```

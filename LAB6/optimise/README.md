@@ -77,7 +77,7 @@ cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
 mkdir -p build-O2 && cd build-O2
 cmake -DPICO_BOARD=pico_w -DCMAKE_BUILD_TYPE=Release ..
 make -j8 optimise
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 cp optimise.uf2 /Volumes/RPI-RP2
 # monitor timing output
 screen /dev/tty.usbmodem* 115200
@@ -90,6 +90,7 @@ New-Item -ItemType Directory -Force -Path build-O2
 cd build-O2
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" -DCMAKE_BUILD_TYPE=Release ..
 cmake --build . --target optimise
+# flash to Pico W (bootsel mode)
 Copy-Item optimise.uf2 -Destination D:\
 ```
 

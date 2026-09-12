@@ -61,7 +61,7 @@ sed -i '' 's/bughunt4\.c/l298n.c/g; s/bughunt4/l298n/g; /algo\.c/d' CMakeLists.t
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 l298n
-# flash to pico (bootsel mode)
+# flash to Pico W (bootsel mode)
 cp l298n.uf2 /Volumes/RPI-RP2
 # open serial monitor (Ctrl-A Ctrl-\ to exit)
 screen /dev/tty.usbmodem* 115200
@@ -78,7 +78,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target l298n
-# flash to pico
+# flash to Pico W (bootsel mode)
 Copy-Item l298n.uf2 -Destination D:\
 ```
 
@@ -119,7 +119,7 @@ cd ~/pico/pico-examples/adc/adc_console
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 adc_console
-# flash to pico (bootsel mode)
+# flash to Pico W (bootsel mode)
 cp adc_console.uf2 /Volumes/RPI-RP2
 # open serial monitor
 screen /dev/tty.usbmodem* 115200
@@ -133,7 +133,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target adc_console
-# flash to pico
+# flash to Pico W (bootsel mode)
 Copy-Item adc_console.uf2 -Destination D:\
 ```
 

@@ -96,7 +96,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target hello_gpio_irq
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 Copy-Item hello_gpio_irq.uf2 -Destination D:\
 ```
 
@@ -183,7 +183,7 @@ sed -i '' 's/bughunt3\.c/ultrasonic.c/g; s/bughunt3/ultrasonic/g' CMakeLists.txt
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 ultrasonic
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 cp ultrasonic.uf2 /Volumes/RPI-RP2
 # monitor serial output
 screen /dev/tty.usbmodem* 115200
@@ -199,7 +199,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target ultrasonic
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 Copy-Item ultrasonic.uf2 -Destination D:\
 ```
 

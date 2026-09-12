@@ -45,7 +45,7 @@ note on `gpio_init(BTN_PIN)`:
 
 build & flash (macOS):
 ```sh
-# copy SDK import helper
+# copy SDK import helper from pico-sdk
 cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
 # copy CMakeLists from bughunt & patch target to picow_blink_button
 cp bughunt/CMakeLists.txt CMakeLists.txt
@@ -60,7 +60,7 @@ cp picow_blink_button.uf2 /Volumes/RPI-RP2
 
 windows (powershell):
 ```powershell
-# copy SDK import helper & CMakeLists from bughunt
+# copy SDK import helper from pico-sdk & CMakeLists from bughunt
 Copy-Item C:\pico\pico-sdk\external\pico_sdk_import.cmake .
 Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
 (Get-Content CMakeLists.txt) -replace 'bughunt2', 'picow_blink_button' -replace 'bughunt2_pico.c', 'picow_blink_button.c' -replace '\s*frame.c', '' | Set-Content CMakeLists.txt
@@ -69,7 +69,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target picow_blink_button
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 Copy-Item picow_blink_button.uf2 -Destination D:\
 ```
 
@@ -98,6 +98,7 @@ sed -i '' 's/bughunt2_pico\.c/pulse.c/g; s/bughunt2/pulse/g; /frame\.c/d' CMakeL
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 pulse
+# flash to Pico W (bootsel mode)
 cp pulse.uf2 /Volumes/RPI-RP2
 ```
 
@@ -111,6 +112,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target pulse
+# flash to Pico W (bootsel mode)
 Copy-Item pulse.uf2 -Destination D:\
 ```
 
@@ -124,63 +126,78 @@ paired UART0 transmission, single-board UART1 loopback & intermittent FIFO loss 
 
 cross-board communication between 2 Pico W boards over UART0 at 115200 baud (8 data bits, 1 stop bit, no parity). Pico A runs `hello_uart.c` transmitting characters 'A' through 'Z', while Pico B runs `uart_rx.c` receiving data & printing over USB CDC serial.
 
-extra hardware:
-- Pico
+hardware requirements:
+- 2x Raspberry Pi Pico W boards
 - 3x jumper wires
+- 2x micro-USB cables connected to separate laptops
 
 ![Screenshot of Connecting 2 Pico W Together](img/p2puart.png)
 paired UART wiring setup with crossed TX/RX lines & common ground.
 
-hardware wiring:
+hardware wiring table:
 
 | Pico A (Transmitter) | Pico B (Receiver) | Signal | Purpose |
 |---|---|---|---|
 | Pin 1 (GP0 - TX0) | Pin 2 (GP1 - RX0) | TX $\to$ RX | Pico A transmits to Pico B |
 | Pin 2 (GP1 - RX0) | Pin 1 (GP0 - TX0) | RX $\leftarrow$ TX | Bidirectional return link (optional) |
-| Pin 3 (GND) | Pin 3 (GND) | Common GND | Mandatory common voltage reference |
+| Pin 3 (GND) | Pin 3 (GND) | Common GND | **Mandatory** common voltage reference |
 
-partner A execution (Transmitter):
+#### source code overview
+
+1. **Transmitter (`hello_uart.c` - Partner A):**
+   Continuous transmission loop sending characters `'A'` through `'Z'` every 1000 ms:
+   ```c
+   char letter = 'A';
+   while (true) {
+       uart_putc(UART_ID, letter);
+       letter = (letter >= 'Z') ? 'A' : letter + 1;
+       sleep_ms(1000);
+   }
+   ```
+2. **Receiver (`uart_rx.c` - Partner B):**
+   Polls `uart_is_readable()` and streams received characters to USB CDC via `printf("%c\n", charData)`.
+
+#### partner A execution (Transmitter):
 
 macOS:
 ```sh
-# copy hello_uart.c from pico examples
-cp ~/pico/pico-examples/uart/hello_uart/hello_uart.c .
 # copy CMakeLists from bughunt & patch target to hello_uart
 cp bughunt/CMakeLists.txt CMakeLists.txt
 sed -i '' 's/bughunt2_pico\.c/hello_uart.c/g; s/bughunt2/hello_uart/g; /frame\.c/d' CMakeLists.txt
-# build & flash to Pico A (bootsel mode)
+# build & flash
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 hello_uart
+# flash to Pico A (bootsel mode)
 cp hello_uart.uf2 /Volumes/RPI-RP2
 ```
 
 windows (powershell):
 ```powershell
-# copy hello_uart.c from pico examples
-Copy-Item C:\pico\pico-examples\uart\hello_uart\hello_uart.c .
 # copy CMakeLists from bughunt & patch target to hello_uart
 Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
 (Get-Content CMakeLists.txt) -replace 'bughunt2', 'hello_uart' -replace 'bughunt2_pico.c', 'hello_uart.c' -replace '\s*frame.c', '' | Set-Content CMakeLists.txt
-# build & flash to Pico A (bootsel mode)
+# build & flash
 New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target hello_uart
+# flash to Pico A (bootsel mode)
 Copy-Item hello_uart.uf2 -Destination D:\
 ```
 
-partner B execution (Receiver):
+#### partner B execution (Receiver):
 
 macOS:
 ```sh
 # copy CMakeLists from bughunt & patch target to uart_rx
 cp bughunt/CMakeLists.txt CMakeLists.txt
 sed -i '' 's/bughunt2_pico\.c/uart_rx.c/g; s/bughunt2/uart_rx/g; /frame\.c/d' CMakeLists.txt
-# build & flash to Pico B (bootsel mode)
+# build & flash
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 uart_rx
+# flash to Pico B (bootsel mode)
 cp uart_rx.uf2 /Volumes/RPI-RP2
 # open serial monitor (Ctrl-A Ctrl-\ to exit)
 screen /dev/cu.usbmodem* 115200
@@ -191,27 +208,90 @@ windows (powershell):
 # copy CMakeLists from bughunt & patch target to uart_rx
 Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
 (Get-Content CMakeLists.txt) -replace 'bughunt2', 'uart_rx' -replace 'bughunt2_pico.c', 'uart_rx.c' -replace '\s*frame.c', '' | Set-Content CMakeLists.txt
-# build & flash to Pico B (bootsel mode)
+# build & flash
 New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target uart_rx
+# flash to Pico B (bootsel mode)
 Copy-Item uart_rx.uf2 -Destination D:\
 ```
 
+expected output (Partner B serial monitor):
+```
+A
+B
+C
+...
+Z
+A
+```
+
+---
+
 ### part B: single-board UART1 loopback
 
-single-board UART1 loopback on GP8 (TX1) & GP9 (RX1) with GP22 button control.
+single-board UART1 loopback on GP8 (TX1) & GP9 (RX1) with GP22 button control (`uart_loopback.c`).
 
-extra hardware:
+hardware requirements:
+- 1x Raspberry Pi Pico W (mounted on Maker Pi Base)
 - 1x jumper wire
+
+hardware wiring:
+- Connect **Pin 11 (GP8 - UART1 TX)** directly to **Pin 12 (GP9 - UART1 RX)** using 1 jumper wire.
+- Button **GP22** is hardwired on the Maker Pi Base (active-low with internal pull-up).
 
 ![Screenshot of UART Loopback](img/ex2v2.png)
 jumper wire linking GP8 directly to GP9 for local loopback verification.
 
-loopback behavior:
-- button GP22 unpressed (high): transmits character `'1'` through UART1 every 1 second. The receiver reads `'1'` & prints `'2'` to the USB terminal.
-- button GP22 pressed (low): transmits uppercase letters `'A'` through `'Z'` sequentially with 1-second delay (wrapping back to `'A'`). The receiver converts received uppercase characters to lowercase (`'a'`-`'z'`) & prints to USB terminal.
+loopback behavior & logic:
+- **Button GP22 unpressed (high):** software transmits character `'1'` through UART1 every 1 second. The receiver reads `'1'` from GP9 and prints `'2'` to the USB serial terminal.
+- **Button GP22 pressed (low):** software transmits uppercase letters `'A'` through `'Z'` sequentially with a 1-second delay (wrapping to `'A'`). The receiver reads incoming characters, converts uppercase to lowercase (`'a'`-`'z'`), and prints to the USB serial terminal.
+
+build & flash (`uart_loopback`):
+
+macOS:
+```sh
+# copy CMakeLists from bughunt & patch target to uart_loopback
+cp bughunt/CMakeLists.txt CMakeLists.txt
+sed -i '' 's/bughunt2_pico\.c/uart_loopback.c/g; s/bughunt2/uart_loopback/g; /frame\.c/d' CMakeLists.txt
+# build & flash
+mkdir -p build && cd build
+cmake -DPICO_BOARD=pico_w ..
+make -j8 uart_loopback
+# flash to Pico W (bootsel mode)
+cp uart_loopback.uf2 /Volumes/RPI-RP2
+# open serial monitor (Ctrl-A Ctrl-\ to exit)
+screen /dev/cu.usbmodem* 115200
+```
+
+windows (powershell):
+```powershell
+# copy CMakeLists from bughunt & patch target to uart_loopback
+Copy-Item bughunt\CMakeLists.txt CMakeLists.txt
+(Get-Content CMakeLists.txt) -replace 'bughunt2', 'uart_loopback' -replace 'bughunt2_pico.c', 'uart_loopback.c' -replace '\s*frame.c', '' | Set-Content CMakeLists.txt
+# build & flash
+New-Item -ItemType Directory -Force -Path build
+cd build
+cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
+cmake --build . --target uart_loopback
+# flash to Pico W (bootsel mode)
+Copy-Item uart_loopback.uf2 -Destination D:\
+```
+
+expected output:
+```
+# When GP22 is NOT pressed:
+2
+2
+2
+
+# While holding GP22 pressed:
+a
+b
+c
+...
+```
 
 ### part C: deliberate intermittent fault FIFO loss analysis
 

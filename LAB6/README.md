@@ -129,7 +129,7 @@ sed -i '' '/bughunt6\.c/d; s/bughunt6_pico\.c/task1.c/g; s/bughunt6/task1/g' CMa
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 task1
-# flash UF2 via bootsel volume
+# flash to Pico W (bootsel mode)
 cp task1.uf2 /Volumes/RPI-RP2
 # monitor serial output
 screen /dev/tty.usbmodem* 115200
@@ -147,7 +147,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target task1
-# flash
+# flash to Pico W (bootsel mode)
 Copy-Item task1.uf2 -Destination D:\
 ```
 
@@ -195,6 +195,7 @@ sed -i '' '/bughunt6\.c/d; s/bughunt6_pico\.c/hello_48MHz.c/g; s/bughunt6/hello_
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 hello_48MHz
+# flash to Pico W (bootsel mode)
 cp hello_48MHz.uf2 /Volumes/RPI-RP2
 ```
 
@@ -211,6 +212,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target hello_48MHz
+# flash to Pico W (bootsel mode)
 Copy-Item hello_48MHz.uf2 -Destination D:\
 ```
 

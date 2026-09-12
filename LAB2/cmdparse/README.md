@@ -65,7 +65,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target cmdparse
-# flash to Pico W
+# flash to Pico W (bootsel mode)
 Copy-Item cmdparse.uf2 -Destination D:\
 ```
 

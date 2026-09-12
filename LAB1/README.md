@@ -123,7 +123,7 @@ sed -i '' 's/bughunt1/blinky/g' CMakeLists.txt
 rm -rf build && mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w ..
 make -j8 blinky
-# flash to pico (bootsel mode)
+# flash to Pico W (bootsel mode)
 cp blinky.uf2 /Volumes/RPI-RP2
 ```
 
@@ -138,7 +138,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" ..
 cmake --build . --target blinky
-# flash
+# flash to Pico W (bootsel mode)
 Copy-Item blinky.uf2 -Destination D:\
 ```
 

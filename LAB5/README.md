@@ -63,7 +63,7 @@ cp ~/pico/pico-sdk/external/pico_sdk_import.cmake .
 mkdir -p build && cd build
 cmake -DPICO_BOARD=pico_w -DFREERTOS_KERNEL_PATH=$HOME/pico/FreeRTOS-Kernel ..
 make -j8 picow_freertos_ping_sys
-# flash to pico (bootsel mode)
+# flash to Pico W (bootsel mode)
 cp picow_freertos_ping_sys.uf2 /Volumes/RPI-RP2
 # open serial monitor (Ctrl-A Ctrl-\ to exit)
 screen /dev/tty.usbmodem* 115200
@@ -81,7 +81,7 @@ New-Item -ItemType Directory -Force -Path build
 cd build
 cmake -DPICO_SDK_PATH="C:\pico\pico-sdk" -DPICO_BOARD=pico_w -DFREERTOS_KERNEL_PATH="C:\FreeRTOS-Kernel-main" ..
 cmake --build . --target picow_freertos_ping_sys
-# flash to pico
+# flash to Pico W (bootsel mode)
 Copy-Item picow_freertos_ping_sys.uf2 -Destination D:\
 ```
 
